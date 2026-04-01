@@ -1,0 +1,542 @@
+
+PROJECT CONTEXT
+========================================
+
+DIRECTORY TREE
+----------------------------------------
+├── App
+│   ├── app.cpp
+│   └── app.h
+├── config
+│   ├── pins.h
+│   ├── webSocket.h
+│   └── wifiConfig.h
+├── drivers
+│   ├── button.cpp
+│   ├── button.h
+│   ├── led.cpp
+│   └── led.h
+├── services
+│   ├── webSocketService.cpp
+│   ├── webSocketService.h
+│   ├── wifiService.cpp
+│   └── wifiService.h
+└── main.cpp
+
+FILE CONTENTS
+----------------------------------------
+
+==================================================
+FILE: src\main.cpp
+==================================================
+
+#include <Arduino.h>
+#include "app/app.h"
+
+void setup() {
+    Serial.begin(115200);
+    App::init();
+}
+
+void loop() {
+    App::run();
+}
+
+
+
+==================================================
+FILE: src\App\app.cpp
+==================================================
+
+#include <Arduino.h>
+#include "app.h"
+#include "../config/pins.h"
+#include "../drivers/led.h"
+#include "../drivers/button.h"
+#include "../services/wifiService.h"
+#include "../services/webSocketService.h"
+
+// ============================================================================
+// HARDWARE INITIALIZATION
+// ============================================================================
+
+static Led wifiLed(LED_PIN);                
+static Led recordingLed(RECORDING_LED_PIN); 
+static Led socketConnectedLed(SOCKET_CONNECTED_LED_PIN);
+static Button button(RECORDING_BUTTON_PIN);  
+
+// ============================================================================
+// SERVICES
+// ============================================================================
+
+static WifiService wifi;
+static WebSocketService webSocket;
+
+// ============================================================================
+// STATE MANAGEMENT
+// ============================================================================
+
+const char* DEVICE_ID = "synchora84205@!&100@!%device";
+bool isRecording = false;
+
+unsigned long lastBlink = 0;
+unsigned long lastSocketBlink = 0;
+bool wifiLedState = false;
+bool socketLedState = false;
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void handleButtonAndRecording();
+void updateWifiLed();
+void updateSocketLed();
+
+// ============================================================================
+// WEBSOCKET CALLBACKS
+// ============================================================================
+
+void onWebSocketConnected(const char* message) {
+    Serial.println("[App] 🔗 WebSocket connected - Sending TOKEN...");
+    
+    // Send authentication token
+    String tokenMsg = "{\"event\":\"TOKEN\",\"user_id\":\"";
+    tokenMsg += DEVICE_ID;
+    tokenMsg += "\"}";
+    webSocket.sendMessage(tokenMsg.c_str());
+}
+
+void onWebSocketDisconnected(const char* message) {
+    Serial.println("[App] ❌ WebSocket disconnected");
+    isRecording = false;
+    recordingLed.off();
+}
+
+void onWebSocketMessage(const char* message) {
+    Serial.printf("[App] 📨 Message received: %s\n", message);
+    
+    // Parse and handle different event types from server
+    // Example: {"status":"ok"} or {"error":"..."}
+    // Add your custom logic here
+}
+
+void onWebSocketError(const char* message) {
+    Serial.printf("[App] ⚠️ WebSocket error: %s\n", message);
+}
+
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
+void App::init(){
+    Serial.begin(115200);
+    delay(1000);
+    Serial.println("\n\n[App] 🚀 Initializing Synchora Device...");
+
+    Serial.println("[App] 📡 Starting WiFi...");
+    wifi.init(); // now blocks until connected
+
+    Serial.println("[App] 🔌 Starting WebSocket...");
+    webSocket.onConnected(onWebSocketConnected);
+    webSocket.onDisconnected(onWebSocketDisconnected);
+    webSocket.onMessage(onWebSocketMessage);
+    webSocket.onError(onWebSocketError);
+    webSocket.init(); // safe to call now — DNS will resolve
+
+    Serial.println("[App] ✅ Initialization complete!");
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+
+void App::run(){
+    // 🌐 Update WiFi and WebSocket services
+    webSocket.run();
+
+    // 🔘 BUTTON & RECORDING LED
+    handleButtonAndRecording();
+
+    // 💡 WiFi LED Status
+    updateWifiLed();
+
+    // 💡 WebSocket LED Status
+    updateSocketLed();
+}
+
+// ============================================================================
+// LED & BUTTON HANDLERS
+// ============================================================================
+
+void handleButtonAndRecording() {
+    if (button.isPressed()) {
+        if (!isRecording) {
+            Serial.println("[App] 🎙️ Recording started");
+            isRecording = true;
+            recordingLed.on();
+            
+            // Send START event to server
+            webSocket.sendEvent("START");
+        }
+    } else {
+        if (isRecording) {
+            Serial.println("[App] ⏹️ Recording stopped");
+            isRecording = false;
+            recordingLed.off();
+            
+            // Send END event to server
+            webSocket.sendEvent("END");
+        }
+    }
+}
+
+void updateWifiLed() {
+    if (wifi.isConnected()) {
+        wifiLed.on(); // WiFi connected - solid ON
+    } else {
+        // WiFi disconnected - blink every 500ms
+        if (millis() - lastBlink > 500) {
+            lastBlink = millis();
+            wifiLedState = !wifiLedState;
+            wifiLedState ? wifiLed.on() : wifiLed.off();
+        }
+    }
+}
+
+void updateSocketLed() {
+    if (webSocket.isConnected()) {
+        socketConnectedLed.on(); // WebSocket connected - solid ON
+    } else {
+        // WebSocket disconnected - blink every 500ms
+        if (millis() - lastSocketBlink > 500) {
+            lastSocketBlink = millis();
+            socketLedState = !socketLedState;
+            socketLedState ? socketConnectedLed.on() : socketConnectedLed.off();
+        }
+    }
+}
+
+
+
+==================================================
+FILE: src\App\app.h
+==================================================
+
+#pragma once
+class App {
+public:
+    static void init();
+    static void run();
+};
+
+
+
+==================================================
+FILE: src\config\pins.h
+==================================================
+
+#pragma once
+
+#define LED_PIN 2
+#define RECORDING_LED_PIN 4
+#define RECORDING_BUTTON_PIN 13
+#define SOCKET_CONNECTED_LED_PIN 14
+
+
+
+
+==================================================
+FILE: src\config\webSocket.h
+==================================================
+
+#pragma once
+
+#define WEBSOCKET_URL "ws://16e8-2401-4900-1c85-76a-5c70-975e-3197-df4c.ngrok-free.app"
+
+
+
+==================================================
+FILE: src\config\wifiConfig.h
+==================================================
+
+#pragma once
+#define WIFI_SSID "Realme11x"
+#define WIFI_PASS "micromax"
+
+
+
+==================================================
+FILE: src\drivers\button.cpp
+==================================================
+
+#include <Arduino.h>
+#include "button.h"
+
+Button::Button(int pin) {
+    _pin = pin;
+    pinMode(_pin, INPUT_PULLUP);
+}
+
+bool Button::isPressed() {
+    return digitalRead(_pin) == LOW;
+}
+
+
+
+==================================================
+FILE: src\drivers\button.h
+==================================================
+
+#pragma once
+
+class Button {
+public:
+    Button(int pin);
+    bool isPressed();
+private:
+    int _pin;
+};
+
+
+
+==================================================
+FILE: src\drivers\led.cpp
+==================================================
+
+#include <Arduino.h>
+#include "led.h"
+
+Led::Led(int pin) {
+    _pin = pin;
+    pinMode(_pin, OUTPUT);
+}
+
+void Led::on() { digitalWrite(_pin, HIGH); }
+void Led::off() { digitalWrite(_pin, LOW); }
+
+
+
+==================================================
+FILE: src\drivers\led.h
+==================================================
+
+#pragma once
+
+class Led {
+public:
+    Led(int pin);
+    void on();
+    void off();
+private:
+    int _pin;
+};
+
+
+
+==================================================
+FILE: src\services\webSocketService.cpp
+==================================================
+
+#include <Arduino.h>
+#include <WebSocketsClient.h>
+#include "../config/webSocket.h"
+#include "webSocketService.h"
+
+WebSocketsClient webSocket;
+WebSocketService* WebSocketService::_instance = nullptr;
+
+// ============================================================================
+// EVENT HANDLER (UNCHANGED)
+void webSocketEventHandler(WStype_t type, uint8_t* payload, size_t length) {
+  if (WebSocketService::_instance == nullptr) return;
+  WebSocketService* svc = WebSocketService::_instance;
+
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.println("[WebSocket] ❌ Disconnected");
+      svc->_currentState = WebSocketEvent::DISCONNECTED;
+      if (svc->_onDisconnectedCb) svc->_onDisconnectedCb("Disconnected from server");
+      break;
+    case WStype_CONNECTED:
+      Serial.println("[WebSocket] ✅ Connected");
+      svc->_currentState = WebSocketEvent::CONNECTED;
+      if (svc->_onConnectedCb) svc->_onConnectedCb("Connected to server");
+      break;
+    case WStype_TEXT: {
+      Serial.printf("[WebSocket] 📨 Received: %s\n", payload);
+      if (svc->_onMessageCb) {
+        char* message = (char*)malloc(length + 1);
+        memcpy(message, payload, length);
+        message[length] = '\0';
+        svc->_onMessageCb(message);
+        free(message);
+      }
+      break;
+    }
+    case WStype_BIN: Serial.println("[WebSocket] 🔲 Binary data"); break;
+    case WStype_ERROR:
+      Serial.println("[WebSocket] ⚠️ Error");
+      svc->_currentState = WebSocketEvent::ERROR;
+      if (svc->_onErrorCb) svc->_onErrorCb("WebSocket error");
+      break;
+    default: break;
+  }
+}
+
+// ============================================================================
+// FIXED INIT - SSL BYPASS FOR NGROK
+void WebSocketService::init() {
+  _instance = this;
+  _currentState = WebSocketEvent::CONNECTING;
+
+  // Use your NEW ngrok URL from logs
+  const char* host = "4f74-2401-4900-1c85-76a-5c70-975e-3197-df4c.ngrok-free.app";
+  
+  Serial.printf("[WebSocket] 🔌 Connecting wss://%s:443/\n", host);
+
+  // NGROK SSL FIX: Use NULL fingerprint + NULL CA = skip verification
+  webSocket.beginSSL(host, 443, "/", NULL);  // NULL fingerprint skips cert check
+  
+  // Additional ngrok headers
+  webSocket.setExtraHeaders("ngrok-skip-browser-warning: true");
+  webSocket.setExtraHeaders("User-Agent: ESP32/1.0");
+  
+  webSocket.onEvent(webSocketEventHandler);
+  webSocket.setReconnectInterval(3000);
+}
+
+// ============================================================================
+// RUN WITH DEBUG (UNCHANGED)
+void WebSocketService::run() {
+  webSocket.loop();
+  static unsigned long lastStatus = 0;
+  if (millis() - lastStatus > 10000) {
+    Serial.printf("[WebSocket] State: %d (%s), WiFi: %s\n", 
+                  (int)_currentState,
+                  _currentState == WebSocketEvent::CONNECTED ? "CONNECTED" :
+                  _currentState == WebSocketEvent::CONNECTING ? "CONNECTING" : "DISCONNECTED/ERROR",
+                  WiFi.status() == WL_CONNECTED ? "OK" : "DOWN");
+    lastStatus = millis();
+  }
+}
+
+// ============================================================================
+// REST UNCHANGED
+bool WebSocketService::isConnected() { return _currentState == WebSocketEvent::CONNECTED; }
+
+void WebSocketService::sendEvent(const char* eventType) {
+  if (!isConnected()) {
+    Serial.printf("[WebSocket] ❌ Can't send '%s' - disconnected\n", eventType);
+    return;
+  }
+  String json = "{\"event\":\"" + String(eventType) + "\"}";
+  sendMessage(json.c_str());
+}
+
+void WebSocketService::sendMessage(const char* jsonMessage) {
+  if (!isConnected()) {
+    Serial.println("[WebSocket] ❌ Can't send - disconnected");
+    return;
+  }
+  Serial.printf("[WebSocket] 📤 %s\n", jsonMessage);
+  webSocket.sendTXT(jsonMessage);
+}
+
+void WebSocketService::onConnected(WebSocketCallbackFn cb) { _onConnectedCb = cb; }
+void WebSocketService::onDisconnected(WebSocketCallbackFn cb) { _onDisconnectedCb = cb; }
+void WebSocketService::onMessage(WebSocketCallbackFn cb) { _onMessageCb = cb; }
+void WebSocketService::onError(WebSocketCallbackFn cb) { _onErrorCb = cb; }
+
+
+
+==================================================
+FILE: src\services\webSocketService.h
+==================================================
+
+#pragma once
+
+#include <WebSocketsClient.h>
+
+enum class WebSocketEvent {
+  DISCONNECTED,
+  CONNECTING,
+  CONNECTED,
+  ERROR
+};
+
+typedef void (*WebSocketCallbackFn)(const char* message);
+
+// Forward declaration for friend function
+void webSocketEventHandler(WStype_t type, uint8_t* payload, size_t length);
+
+class WebSocketService {
+public:
+  void init();
+  void run();
+  bool isConnected();
+  
+  // Send messages to server
+  void sendEvent(const char* eventType);
+  void sendMessage(const char* jsonMessage);
+  
+  // Callback registration for different events
+  void onConnected(WebSocketCallbackFn callback);
+  void onDisconnected(WebSocketCallbackFn callback);
+  void onMessage(WebSocketCallbackFn callback);
+  void onError(WebSocketCallbackFn callback);
+  
+  // Static instance for event handler access
+  static WebSocketService* _instance;
+
+private:
+  friend void webSocketEventHandler(WStype_t type, uint8_t* payload, size_t length);
+  
+  WebSocketEvent _currentState = WebSocketEvent::DISCONNECTED;
+  WebSocketCallbackFn _onConnectedCb = nullptr;
+  WebSocketCallbackFn _onDisconnectedCb = nullptr;
+  WebSocketCallbackFn _onMessageCb = nullptr;
+  WebSocketCallbackFn _onErrorCb = nullptr;
+};
+
+
+
+
+
+
+==================================================
+FILE: src\services\wifiService.cpp
+==================================================
+
+#include <WiFi.h>
+#include "../config/wifiConfig.h"
+#include "wifiService.h"
+
+void WifiService::init() {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    Serial.print("[WiFi] Connecting");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.printf("\n[WiFi] ✅ Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+}
+
+bool WifiService::isConnected() {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+
+
+==================================================
+FILE: src\services\wifiService.h
+==================================================
+
+#pragma once
+
+class WifiService {
+public:
+    void init();
+    bool isConnected();
+};
+
+

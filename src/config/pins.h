@@ -1,0 +1,6 @@
+#pragma once
+
+#define LED_PIN 2
+#define RECORDING_LED_PIN 4
+#define RECORDING_BUTTON_PIN 13
+#define SOCKET_CONNECTED_LED_PIN 14
