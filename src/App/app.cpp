@@ -1,19 +1,22 @@
 #include <Arduino.h>
 #include "app.h"
 #include "../config/pins.h"
+#include "../config/deviceConfig.h"
 #include "../drivers/led.h"
 #include "../drivers/button.h"
+#include "../drivers/mic.h"
 #include "../services/wifiService.h"
 #include "../services/webSocketService.h"
 
 // ============================================================================
-// HARDWARE INITIALIZATION
+// HARDWARE
 // ============================================================================
 
-static Led wifiLed(LED_PIN);                
-static Led recordingLed(RECORDING_LED_PIN); 
+static Led wifiLed(LED_PIN);
+static Led recordingLed(RECORDING_LED_PIN);
 static Led socketConnectedLed(SOCKET_CONNECTED_LED_PIN);
-static Button button(RECORDING_BUTTON_PIN);  
+static Button button(RECORDING_BUTTON_PIN);
+static Mic mic;
 
 // ============================================================================
 // SERVICES
@@ -23,10 +26,9 @@ static WifiService wifi;
 static WebSocketService webSocket;
 
 // ============================================================================
-// STATE MANAGEMENT
+// STATE
 // ============================================================================
 
-const char* DEVICE_ID = "synchora84205@!&100@!%device";
 bool isRecording = false;
 
 unsigned long lastBlink = 0;
@@ -48,8 +50,6 @@ void updateSocketLed();
 
 void onWebSocketConnected(const char* message) {
     Serial.println("[App] 🔗 WebSocket connected - Sending TOKEN...");
-    
-    // Send authentication token
     String tokenMsg = "{\"event\":\"TOKEN\",\"user_id\":\"";
     tokenMsg += DEVICE_ID;
     tokenMsg += "\"}";
@@ -64,10 +64,6 @@ void onWebSocketDisconnected(const char* message) {
 
 void onWebSocketMessage(const char* message) {
     Serial.printf("[App] 📨 Message received: %s\n", message);
-    
-    // Parse and handle different event types from server
-    // Example: {"status":"ok"} or {"error":"..."}
-    // Add your custom logic here
 }
 
 void onWebSocketError(const char* message) {
@@ -75,47 +71,44 @@ void onWebSocketError(const char* message) {
 }
 
 // ============================================================================
-// INITIALIZATION
+// INIT
 // ============================================================================
 
-void App::init(){
-    Serial.begin(115200);
+void App::init() {
+    // Serial.begin already called in main.cpp — removed duplicate here
     delay(1000);
     Serial.println("\n\n[App] 🚀 Initializing Synchora Device...");
 
     Serial.println("[App] 📡 Starting WiFi...");
-    wifi.init(); // now blocks until connected
+    wifi.init();
+
+    Serial.println("[App] 🎙️ Starting Mic...");
+    mic.init();
 
     Serial.println("[App] 🔌 Starting WebSocket...");
     webSocket.onConnected(onWebSocketConnected);
     webSocket.onDisconnected(onWebSocketDisconnected);
     webSocket.onMessage(onWebSocketMessage);
     webSocket.onError(onWebSocketError);
-    webSocket.init(); // safe to call now — DNS will resolve
+    webSocket.init();
 
     Serial.println("[App] ✅ Initialization complete!");
 }
 
 // ============================================================================
-// MAIN LOOP
+// LOOP
 // ============================================================================
 
-void App::run(){
-    // 🌐 Update WiFi and WebSocket services
+void App::run() {
+    wifi.reconnectIfNeeded(); // handles WiFi drop and reconnect
     webSocket.run();
-
-    // 🔘 BUTTON & RECORDING LED
     handleButtonAndRecording();
-
-    // 💡 WiFi LED Status
     updateWifiLed();
-
-    // 💡 WebSocket LED Status
     updateSocketLed();
 }
 
 // ============================================================================
-// LED & BUTTON HANDLERS
+// BUTTON & RECORDING
 // ============================================================================
 
 void handleButtonAndRecording() {
@@ -124,27 +117,38 @@ void handleButtonAndRecording() {
             Serial.println("[App] 🎙️ Recording started");
             isRecording = true;
             recordingLed.on();
-            
-            // Send START event to server
             webSocket.sendEvent("START");
         }
+
+        // Stream audio while button is held
+        // mic.read() reads numSamples x 32-bit samples from I2S,
+        // converts to 16-bit, returns byte count of output (numSamples x 2 bytes)
+        if (webSocket.isConnected()) {
+            uint8_t buffer[1024]; // holds 512 x int16_t samples
+            int bytes = mic.read(buffer, 512); // 512 = number of 32-bit raw samples to read
+            if (bytes > 0) {
+                webSocket.sendBinary(buffer, bytes);
+            }
+        }
+
     } else {
         if (isRecording) {
             Serial.println("[App] ⏹️ Recording stopped");
             isRecording = false;
             recordingLed.off();
-            
-            // Send END event to server
             webSocket.sendEvent("END");
         }
     }
 }
 
+// ============================================================================
+// LED HANDLERS
+// ============================================================================
+
 void updateWifiLed() {
     if (wifi.isConnected()) {
-        wifiLed.on(); // WiFi connected - solid ON
+        wifiLed.on();
     } else {
-        // WiFi disconnected - blink every 500ms
         if (millis() - lastBlink > 500) {
             lastBlink = millis();
             wifiLedState = !wifiLedState;
@@ -155,9 +159,8 @@ void updateWifiLed() {
 
 void updateSocketLed() {
     if (webSocket.isConnected()) {
-        socketConnectedLed.on(); // WebSocket connected - solid ON
+        socketConnectedLed.on();
     } else {
-        // WebSocket disconnected - blink every 500ms
         if (millis() - lastSocketBlink > 500) {
             lastSocketBlink = millis();
             socketLedState = !socketLedState;
