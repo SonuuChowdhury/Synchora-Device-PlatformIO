@@ -260,6 +260,11 @@ FILE: src\config\pins.h
 #define MIC_SD_PIN 32
 #define MIC_WS_PIN 15
 #define MIC_SCK_PIN 26
+#define EMERGENCY_BUTTON_PIN     23
+#define EMERGENCY_BUTTON_LED_PIN 22
+#define DHT22_PIN                5
+#define GPS_RX_PIN               16
+#define GPS_TX_PIN               17            
 
 
 
@@ -270,8 +275,8 @@ FILE: src\config\webSocket.h
 
 #pragma once
 
-#define WEBSOCKET_URL  "ws://ae09-2401-4900-1c84-96c9-8c4-54ff-90b1-5a4f.ngrok-free.app"
-#define WEBSOCKET_PORT 443
+#define WEBSOCKET_URL  "ws://b44c-2401-4900-1c00-16c0-f0b8-d183-bad5-dab1.ngrok-free.app"
+#define WEBSOCKET_PORT 80
 #define WEBSOCKET_PATH "/"
 
 
@@ -376,7 +381,7 @@ void Mic::init() {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
         .sample_rate          = SAMPLE_RATE,
         .bits_per_sample      = I2S_BITS_PER_SAMPLE_32BIT,
-        .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
+        .channel_format       = I2S_CHANNEL_FMT_ONLY_RIGHT,
         .communication_format = I2S_COMM_FORMAT_I2S,
         .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count        = DMA_BUF_COUNT,
@@ -482,7 +487,7 @@ int Mic::read(uint8_t* buffer, size_t numSamples) {
     int16_t* out = (int16_t*)buffer;
 
     for (int i = 0; i < samplesRead; i++) {
-        int32_t s = raw[i] >> 8;
+        int32_t s = raw[i] >> 14;
         if (s >  32767) s =  32767;
         if (s < -32768) s = -32768;
         out[i] = (int16_t)s;

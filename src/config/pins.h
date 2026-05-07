@@ -7,3 +7,8 @@
 #define MIC_SD_PIN 32
 #define MIC_WS_PIN 15
 #define MIC_SCK_PIN 26
+#define EMERGENCY_BUTTON_PIN     23
+#define EMERGENCY_BUTTON_LED_PIN 22
+#define DHT22_PIN                5
+#define GPS_RX_PIN               16
+#define GPS_TX_PIN               17            
