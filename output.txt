@@ -15,6 +15,10 @@ DIRECTORY TREE
 ├── drivers
 │   ├── button.cpp
 │   ├── button.h
+│   ├── dht.cpp
+│   ├── dht.h
+│   ├── gps.cpp
+│   ├── gps.h
 │   ├── led.cpp
 │   ├── led.h
 │   ├── mic.cpp
@@ -58,6 +62,8 @@ FILE: src\App\app.cpp
 #include "../drivers/led.h"
 #include "../drivers/button.h"
 #include "../drivers/mic.h"
+#include "../drivers/dht.h"
+#include "../drivers/gps.h"
 #include "../services/wifiService.h"
 #include "../services/webSocketService.h"
 
@@ -65,58 +71,127 @@ FILE: src\App\app.cpp
 // HARDWARE
 // ============================================================================
 
-static Led wifiLed(LED_PIN);
-static Led recordingLed(RECORDING_LED_PIN);
-static Led socketConnectedLed(SOCKET_CONNECTED_LED_PIN);
+static Led    wifiLed(LED_PIN);
+static Led    recordingLed(RECORDING_LED_PIN);
+static Led    socketConnectedLed(SOCKET_CONNECTED_LED_PIN);
+static Led    emergencyLed(EMERGENCY_BUTTON_LED_PIN);
+
 static Button button(RECORDING_BUTTON_PIN);
-static Mic mic;
+static Button emergencyButton(EMERGENCY_BUTTON_PIN);
+
+static Mic       mic;
+static DhtSensor dht;
+static GpsSensor gps;
 
 // ============================================================================
 // SERVICES
 // ============================================================================
 
-static WifiService wifi;
+static WifiService      wifi;
 static WebSocketService webSocket;
 
 // ============================================================================
-// STATE
+// STATE — RECORDING
 // ============================================================================
 
-bool isRecording = false;
+static bool isRecording = false;
 
-unsigned long lastBlink = 0;
-unsigned long lastSocketBlink = 0;
-bool wifiLedState = false;
-bool socketLedState = false;
+// ============================================================================
+// STATE — WiFi LED blink
+// ============================================================================
+
+static unsigned long lastBlink    = 0;
+static bool          wifiLedState = false;
+
+// ============================================================================
+// STATE — Socket LED blink (when disconnected)
+// ============================================================================
+
+static unsigned long lastSocketBlink = 0;
+static bool          socketLedState  = false;
+
+// ============================================================================
+// STATE — EMERGENCY
+// ============================================================================
+
+enum class EmergencyState { IDLE, HOLDING, TRIGGERED, CANCELLING };
+
+static EmergencyState emergencyState     = EmergencyState::IDLE;
+static unsigned long  emergencyHoldStart = 0;
+static unsigned long  cancelHoldStart    = 0;
+static unsigned long  lastEmergencyBlink = 0;
+static bool           emergencyLedState  = false;
+
+static const unsigned long EMERGENCY_HOLD_MS  = 5000;
+static const unsigned long CANCEL_HOLD_MS     = 2000;
+static const unsigned long EMERGENCY_BLINK_MS = 100;
+
+// ============================================================================
+// STATE — TELEMETRY
+// ============================================================================
+
+static unsigned long lastTelemetrySend = 0;
+static const unsigned long TELEMETRY_INTERVAL_MS = 60000;   // 60 seconds
+
+// Flag set by onWebSocketConnected so we send telemetry immediately on connect
+static bool sendTelemetryOnConnect = false;
+
+// ============================================================================
+// STATE — DIAGNOSTIC LOGS
+// ============================================================================
+
+// DHT22: print summary every 12 s (= 4 reads × 3 s each)
+static unsigned long lastDhtPrint = 0;
+static const unsigned long DHT_PRINT_INTERVAL_MS = 12000;
+
+// WebSocket heartbeat log (mirrors original 10 s behaviour)
+static unsigned long lastWsStatus = 0;
+static const unsigned long WS_STATUS_INTERVAL_MS = 10000;
 
 // ============================================================================
 // FORWARD DECLARATIONS
 // ============================================================================
 
 void handleButtonAndRecording();
+void handleEmergencyButton();
+void handleTelemetry();
+void printDhtDiagnostic();
+void printWsStatus();
 void updateWifiLed();
 void updateSocketLed();
+void sendTelemetryNow(const char* reason);
 
 // ============================================================================
 // WEBSOCKET CALLBACKS
 // ============================================================================
 
 void onWebSocketConnected(const char* message) {
-    Serial.println("[App] 🔗 WebSocket connected - Sending TOKEN...");
+    Serial.println("[App] 🔗 WebSocket connected — sending TOKEN...");
     String tokenMsg = "{\"event\":\"TOKEN\",\"user_id\":\"";
     tokenMsg += DEVICE_ID;
     tokenMsg += "\"}";
     webSocket.sendMessage(tokenMsg.c_str());
+
+    // Schedule immediate telemetry push after connect
+    sendTelemetryOnConnect = true;
 }
 
 void onWebSocketDisconnected(const char* message) {
     Serial.println("[App] ❌ WebSocket disconnected");
+
     isRecording = false;
     recordingLed.off();
+
+    if (emergencyState == EmergencyState::HOLDING) {
+        emergencyState = EmergencyState::IDLE;
+        emergencyLed.off();
+    }
+
+    sendTelemetryOnConnect = false;
 }
 
 void onWebSocketMessage(const char* message) {
-    Serial.printf("[App] 📨 Message received: %s\n", message);
+    Serial.printf("[App] 📨 Message: %s\n", message);
 }
 
 void onWebSocketError(const char* message) {
@@ -128,14 +203,19 @@ void onWebSocketError(const char* message) {
 // ============================================================================
 
 void App::init() {
-    // Serial.begin already called in main.cpp — removed duplicate here
     delay(1000);
     Serial.println("\n\n[App] 🚀 Initializing Synchora Device...");
 
     Serial.println("[App] 📡 Starting WiFi...");
     wifi.init();
 
-    Serial.println("[App] 🎙️ Starting Mic...");
+    Serial.println("[App] 🌡️  Starting DHT22...");
+    dht.init();
+
+    Serial.println("[App] 🛰️  Starting GPS...");
+    gps.init();
+
+    Serial.println("[App] 🎙️  Starting Mic...");
     mic.init();
 
     Serial.println("[App] 🔌 Starting WebSocket...");
@@ -145,7 +225,9 @@ void App::init() {
     webSocket.onError(onWebSocketError);
     webSocket.init();
 
-    Serial.println("[App] ✅ Initialization complete!");
+    emergencyLed.off();
+
+    Serial.println("[App] ✅ Initialization complete!\n");
 }
 
 // ============================================================================
@@ -153,19 +235,45 @@ void App::init() {
 // ============================================================================
 
 void App::run() {
-    wifi.reconnectIfNeeded(); // handles WiFi drop and reconnect
+    wifi.reconnectIfNeeded();
     webSocket.run();
+
+    // Sensors — update every loop tick (both are internally throttled)
+    dht.update();
+    gps.update();
+
+    // Features
     handleButtonAndRecording();
+    handleEmergencyButton();
+    handleTelemetry();
+
+    // Diagnostic logs
+    printDhtDiagnostic();
+    printWsStatus();
+
+    // LEDs
     updateWifiLed();
     updateSocketLed();
 }
 
 // ============================================================================
-// BUTTON & RECORDING
+// RECORDING — socket-gated
 // ============================================================================
 
 void handleButtonAndRecording() {
+    bool socketReady = webSocket.isConnected();
+
     if (button.isPressed()) {
+
+        if (!socketReady) {
+            if (isRecording) {
+                Serial.println("[App] ⏹️ Socket lost — stopping recording");
+                isRecording = false;
+                recordingLed.off();
+            }
+            return;
+        }
+
         if (!isRecording) {
             Serial.println("[App] 🎙️ Recording started");
             isRecording = true;
@@ -173,15 +281,10 @@ void handleButtonAndRecording() {
             webSocket.sendEvent("START");
         }
 
-        // Stream audio while button is held
-        // mic.read() reads numSamples x 32-bit samples from I2S,
-        // converts to 16-bit, returns byte count of output (numSamples x 2 bytes)
-        if (webSocket.isConnected()) {
-            uint8_t buffer[1024]; // holds 512 x int16_t samples
-            int bytes = mic.read(buffer, 512); // 512 = number of 32-bit raw samples to read
-            if (bytes > 0) {
-                webSocket.sendBinary(buffer, bytes);
-            }
+        uint8_t buffer[1024];
+        int bytes = mic.read(buffer, 512);
+        if (bytes > 0) {
+            webSocket.sendBinary(buffer, bytes);
         }
 
     } else {
@@ -189,9 +292,186 @@ void handleButtonAndRecording() {
             Serial.println("[App] ⏹️ Recording stopped");
             isRecording = false;
             recordingLed.off();
-            webSocket.sendEvent("END");
+            if (socketReady) webSocket.sendEvent("END");
         }
     }
+}
+
+// ============================================================================
+// EMERGENCY BUTTON STATE MACHINE
+// ============================================================================
+
+void handleEmergencyButton() {
+    bool btnHeld = emergencyButton.isPressed();
+    unsigned long now = millis();
+
+    switch (emergencyState) {
+
+        case EmergencyState::IDLE:
+            if (btnHeld) {
+                emergencyState     = EmergencyState::HOLDING;
+                emergencyHoldStart = now;
+                emergencyLed.on();
+                Serial.println("[Emergency] 🟡 Button held — counting to 5 s...");
+            } else {
+                emergencyLed.off();
+            }
+            break;
+
+        case EmergencyState::HOLDING:
+            if (!btnHeld) {
+                emergencyState = EmergencyState::IDLE;
+                emergencyLed.off();
+                Serial.println("[Emergency] ⬜ Released early — aborted.");
+                break;
+            }
+            if (now - emergencyHoldStart >= EMERGENCY_HOLD_MS) {
+                if (!webSocket.isConnected()) {
+                    Serial.println("[Emergency] ❌ Socket not connected — cannot trigger!");
+                    emergencyState = EmergencyState::IDLE;
+                    emergencyLed.off();
+                    break;
+                }
+                Serial.println("[Emergency] 🚨 TRIGGERED — sending EMERGENCY_TRIGGER");
+                webSocket.sendMessage("{\"event\":\"EMERGENCY_TRIGGER\"}");
+                emergencyState     = EmergencyState::TRIGGERED;
+                emergencyLedState  = false;
+                lastEmergencyBlink = now;
+            }
+            break;
+
+        case EmergencyState::TRIGGERED:
+            if (now - lastEmergencyBlink >= EMERGENCY_BLINK_MS) {
+                lastEmergencyBlink = now;
+                emergencyLedState  = !emergencyLedState;
+                emergencyLedState ? emergencyLed.on() : emergencyLed.off();
+            }
+            if (btnHeld) {
+                emergencyState  = EmergencyState::CANCELLING;
+                cancelHoldStart = now;
+                Serial.println("[Emergency] 🔵 Cancel hold — counting to 2 s...");
+            }
+            break;
+
+        case EmergencyState::CANCELLING:
+            if (!btnHeld) {
+                emergencyState     = EmergencyState::TRIGGERED;
+                lastEmergencyBlink = now;
+                Serial.println("[Emergency] 🔄 Released early — resuming blink.");
+                break;
+            }
+            // Keep fast-blinking during cancel count
+            if (now - lastEmergencyBlink >= EMERGENCY_BLINK_MS) {
+                lastEmergencyBlink = now;
+                emergencyLedState  = !emergencyLedState;
+                emergencyLedState ? emergencyLed.on() : emergencyLed.off();
+            }
+            if (now - cancelHoldStart >= CANCEL_HOLD_MS) {
+                emergencyState = EmergencyState::IDLE;
+                emergencyLed.off();
+                Serial.println("[Emergency] ✅ Cancelled — returning to normal.");
+            }
+            break;
+    }
+}
+
+// ============================================================================
+// TELEMETRY — 60 s interval + immediate on connect + event-driven GPS lock
+// ============================================================================
+
+void sendTelemetryNow(const char* reason) {
+    if (!webSocket.isConnected()) return;
+
+    float temp = dht.temperature();
+    float hum  = dht.humidity();
+    float lat  = gps.hasFix() ? gps.latitude()  : 0.0f;
+    float lng  = gps.hasFix() ? gps.longitude() : 0.0f;
+
+    // Build JSON manually — avoids pulling in ArduinoJson dependency
+    char payload[200];
+    snprintf(payload, sizeof(payload),
+        "{\"event\":\"TELEMETRY_UPDATE\","
+        "\"temperature\":%.2f,"
+        "\"humidity\":%.2f,"
+        "\"latitude\":%.6f,"
+        "\"longitude\":%.6f}",
+        temp, hum, lat, lng
+    );
+
+    Serial.printf("[Telemetry] 📤 Sending (%s) — T=%.1f°C  H=%.1f%%  Lat=%.6f  Lng=%.6f\n",
+                  reason, temp, hum, lat, lng);
+
+    webSocket.sendMessage(payload);
+    lastTelemetrySend = millis();
+}
+
+void handleTelemetry() {
+    unsigned long now = millis();
+
+    // On-connect push (flag set by onWebSocketConnected)
+    if (sendTelemetryOnConnect) {
+        sendTelemetryOnConnect = false;
+        sendTelemetryNow("on-connect");
+        return;
+    }
+
+    // Event-driven: GPS just got its first fix this session
+    if (gps.justGotFix()) {
+        sendTelemetryNow("gps-lock");
+        return;
+    }
+
+    // Regular 60 s interval
+    if (now - lastTelemetrySend >= TELEMETRY_INTERVAL_MS) {
+        sendTelemetryNow("interval-60s");
+    }
+}
+
+// ============================================================================
+// DIAGNOSTIC — DHT22 summary every 12 s
+// ============================================================================
+
+void printDhtDiagnostic() {
+    unsigned long now = millis();
+    if (now - lastDhtPrint < DHT_PRINT_INTERVAL_MS) return;
+    lastDhtPrint = now;
+
+    Serial.println("┌─────────────────────────────────┐");
+    Serial.println("│         DHT22 Diagnostic         │");
+
+    if (dht.hasValidData()) {
+        Serial.printf( "│  Temperature : %6.1f °C         │\n", dht.temperature());
+        Serial.printf( "│  Humidity    : %6.1f %%          │\n", dht.humidity());
+    } else {
+        Serial.println("│  ⚠️  No valid reading yet        │");
+    }
+
+    Serial.printf(  "│  GPS Fix     : %s              │\n",
+                    gps.hasFix() ? "✅ YES" : "❌ NO ");
+    if (gps.hasFix()) {
+        Serial.printf("│  Sats        : %-3d               │\n", gps.satellites());
+        Serial.printf("│  Lat         : %10.6f       │\n", gps.latitude());
+        Serial.printf("│  Lng         : %10.6f       │\n", gps.longitude());
+    } else {
+        Serial.printf("│  Sats in view: %-3d               │\n", gps.satellites());
+    }
+
+    Serial.println("└─────────────────────────────────┘");
+}
+
+// ============================================================================
+// DIAGNOSTIC — WebSocket heartbeat every 10 s
+// ============================================================================
+
+void printWsStatus() {
+    unsigned long now = millis();
+    if (now - lastWsStatus < WS_STATUS_INTERVAL_MS) return;
+    lastWsStatus = now;
+
+    Serial.printf("[WebSocket] State: %s  WiFi: %s\n",
+        webSocket.isConnected() ? "CONNECTED" : "DISCONNECTED",
+        wifi.isConnected()      ? "OK"        : "DOWN"
+    );
 }
 
 // ============================================================================
@@ -203,7 +483,7 @@ void updateWifiLed() {
         wifiLed.on();
     } else {
         if (millis() - lastBlink > 500) {
-            lastBlink = millis();
+            lastBlink    = millis();
             wifiLedState = !wifiLedState;
             wifiLedState ? wifiLed.on() : wifiLed.off();
         }
@@ -216,7 +496,7 @@ void updateSocketLed() {
     } else {
         if (millis() - lastSocketBlink > 500) {
             lastSocketBlink = millis();
-            socketLedState = !socketLedState;
+            socketLedState  = !socketLedState;
             socketLedState ? socketConnectedLed.on() : socketConnectedLed.off();
         }
     }
@@ -275,7 +555,7 @@ FILE: src\config\webSocket.h
 
 #pragma once
 
-#define WEBSOCKET_URL  "ws://b44c-2401-4900-1c00-16c0-f0b8-d183-bad5-dab1.ngrok-free.app"
+#define WEBSOCKET_URL  "ws://b8ed-2401-4900-1c01-a580-1583-2594-660f-fe14.ngrok-free.app"
 #define WEBSOCKET_PORT 80
 #define WEBSOCKET_PATH "/"
 
@@ -321,6 +601,200 @@ public:
     bool isPressed();
 private:
     int _pin;
+};
+
+
+
+==================================================
+FILE: src\drivers\dht.cpp
+==================================================
+
+#include "dht.h"
+#include "../config/pins.h"
+#include <DHT.h>
+
+// DHT22 sensor instance — file-scoped, not exposed in header
+static DHT dht(DHT22_PIN, DHT22);
+
+void DhtSensor::init() {
+    dht.begin();
+    Serial.println("[DHT22] ✅ Initialized on pin " + String(DHT22_PIN));
+}
+
+void DhtSensor::update() {
+    unsigned long now = millis();
+
+    // Enforce minimum 3 s between reads — DHT22 hardware requirement
+    if (now - _lastReadMs < READ_INTERVAL_MS) return;
+    _lastReadMs = now;
+
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+
+    // Validate — isnan() catches failed reads from the sensor
+    if (isnan(t) || isnan(h)) {
+        Serial.println("[DHT22] ⚠️  Read failed — keeping last valid value");
+        return;   // _temp and _hum unchanged, _valid unchanged
+    }
+
+    // Sanity range check — DHT22 spec: -40 to 80 °C, 0–100 %RH
+    if (t < -40.0f || t > 80.0f || h < 0.0f || h > 100.0f) {
+        Serial.printf("[DHT22] ⚠️  Out-of-range reading (T=%.1f H=%.1f) — discarding\n", t, h);
+        return;
+    }
+
+    _temp  = t;
+    _hum   = h;
+    _valid = true;
+}
+
+float DhtSensor::temperature() { return _temp; }
+float DhtSensor::humidity()    { return _hum;  }
+bool  DhtSensor::hasValidData(){ return _valid; }
+
+
+
+==================================================
+FILE: src\drivers\dht.h
+==================================================
+
+#pragma once
+#include <Arduino.h>
+
+class DhtSensor {
+public:
+    void  init();
+    void  update();          // call every loop — internally throttled to 3 s
+    float temperature();     // last valid reading, NaN-safe
+    float humidity();        // last valid reading, NaN-safe
+    bool  hasValidData();    // true once at least one good read happened
+
+private:
+    float        _temp          = 0.0f;
+    float        _hum           = 0.0f;
+    bool         _valid         = false;
+    unsigned long _lastReadMs   = 0;
+
+    static const unsigned long READ_INTERVAL_MS = 3000;
+};
+
+
+
+==================================================
+FILE: src\drivers\gps.cpp
+==================================================
+
+#include "gps.h"
+#include "../config/pins.h"
+#include <TinyGPSPlus.h>
+
+// TinyGPSPlus parser instance — file-scoped
+static TinyGPSPlus gpsParser;
+
+// Hardware serial for NEO-6M
+// ESP32: Serial2 maps to UART2 (configurable pins)
+static HardwareSerial gpsSerial(2);
+
+static const uint32_t GPS_BAUD = 9600;  // NEO-6M default baud rate
+
+void GpsSensor::init() {
+    // Begin Serial2 with custom RX/TX pins from pins.h
+    gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+    Serial.printf("[GPS] ✅ NEO-6M initialized — RX:%d TX:%d @ %d baud\n",
+                  GPS_RX_PIN, GPS_TX_PIN, GPS_BAUD);
+    Serial.println("[GPS] ⏳ Waiting for satellite fix...");
+}
+
+void GpsSensor::update() {
+    // Drain all available bytes into the parser this loop tick
+    // TinyGPSPlus handles NMEA parsing incrementally — never blocks
+    while (gpsSerial.available() > 0) {
+        char c = gpsSerial.read();
+        bool newSentence = gpsParser.encode(c);
+
+        // Only process when a complete NMEA sentence has been parsed
+        if (newSentence) {
+
+            if (gpsParser.location.isValid() && gpsParser.location.isUpdated()) {
+                _lat        = (float)gpsParser.location.lat();
+                _lng        = (float)gpsParser.location.lng();
+                _satellites = (int)gpsParser.satellites.value();
+                _hasFix     = true;
+
+                // Print every GPS update to serial so you can see live data
+                Serial.printf(
+                    "[GPS] 📡 Fix: Lat=%.6f  Lng=%.6f  Sats=%d  Age=%lums\n",
+                    _lat, _lng, _satellites,
+                    gpsParser.location.age()
+                );
+            }
+
+            // Satellites count even without a position fix
+            if (gpsParser.satellites.isValid()) {
+                _satellites = (int)gpsParser.satellites.value();
+                if (!_hasFix) {
+                    Serial.printf("[GPS] 🔍 Searching... Satellites in view: %d\n",
+                                  _satellites);
+                }
+            }
+        }
+    }
+
+    // Detect the no-fix → fix transition for the one-shot event-driven push
+    bool currentFix = _hasFix;
+    if (currentFix && !_prevHasFix) {
+        _justGotFix = true;   // caller will consume this
+        Serial.printf(
+            "[GPS] 🎯 FIRST FIX ACQUIRED — Lat=%.6f  Lng=%.6f  Sats=%d\n",
+            _lat, _lng, _satellites
+        );
+    }
+    _prevHasFix = currentFix;
+}
+
+bool  GpsSensor::hasFix()     { return _hasFix;      }
+float GpsSensor::latitude()   { return _lat;          }
+float GpsSensor::longitude()  { return _lng;          }
+int   GpsSensor::satellites() { return _satellites;   }
+
+bool GpsSensor::justGotFix() {
+    if (_justGotFix) {
+        _justGotFix = false;  // auto-reset — one-shot
+        return true;
+    }
+    return false;
+}
+
+
+
+==================================================
+FILE: src\drivers\gps.h
+==================================================
+
+#pragma once
+#include <Arduino.h>
+
+class GpsSensor {
+public:
+    void  init();
+    void  update();          // feed GPS bytes — call EVERY loop iteration
+
+    bool  hasFix();          // true when satellites locked
+    float latitude();
+    float longitude();
+    int   satellites();
+
+    // Returns true exactly ONCE when fix is first acquired this session.
+    // Caller must consume this flag — it auto-resets after one call.
+    bool  justGotFix();
+
+private:
+    float        _lat           = 0.0f;
+    float        _lng           = 0.0f;
+    int          _satellites    = 0;
+    bool         _hasFix        = false;
+    bool         _prevHasFix    = false;   // to detect fix transition
+    bool         _justGotFix    = false;   // one-shot flag
 };
 
 

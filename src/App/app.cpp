@@ -5,6 +5,8 @@
 #include "../drivers/led.h"
 #include "../drivers/button.h"
 #include "../drivers/mic.h"
+#include "../drivers/dht.h"
+#include "../drivers/gps.h"
 #include "../services/wifiService.h"
 #include "../services/webSocketService.h"
 
@@ -12,69 +14,82 @@
 // HARDWARE
 // ============================================================================
 
-static Led wifiLed(LED_PIN);
-static Led recordingLed(RECORDING_LED_PIN);
-static Led socketConnectedLed(SOCKET_CONNECTED_LED_PIN);
-static Led emergencyLed(EMERGENCY_BUTTON_LED_PIN);
+static Led    wifiLed(LED_PIN);
+static Led    recordingLed(RECORDING_LED_PIN);
+static Led    socketConnectedLed(SOCKET_CONNECTED_LED_PIN);
+static Led    emergencyLed(EMERGENCY_BUTTON_LED_PIN);
 
 static Button button(RECORDING_BUTTON_PIN);
 static Button emergencyButton(EMERGENCY_BUTTON_PIN);
 
-static Mic mic;
+static Mic       mic;
+static DhtSensor dht;
+static GpsSensor gps;
 
 // ============================================================================
 // SERVICES
 // ============================================================================
 
-static WifiService wifi;
+static WifiService      wifi;
 static WebSocketService webSocket;
 
 // ============================================================================
 // STATE — RECORDING
 // ============================================================================
 
-bool isRecording = false;
+static bool isRecording = false;
 
 // ============================================================================
-// STATE — WIFI LED BLINK
+// STATE — WiFi LED blink
 // ============================================================================
 
-unsigned long lastBlink     = 0;
-bool          wifiLedState  = false;
+static unsigned long lastBlink    = 0;
+static bool          wifiLedState = false;
 
 // ============================================================================
-// STATE — SOCKET LED BLINK (when disconnected)
+// STATE — Socket LED blink (when disconnected)
 // ============================================================================
 
-unsigned long lastSocketBlink = 0;
-bool          socketLedState  = false;
+static unsigned long lastSocketBlink = 0;
+static bool          socketLedState  = false;
 
 // ============================================================================
 // STATE — EMERGENCY
-//
-//  IDLE        → button not held, led off (or solid while counting)
-//  HOLDING     → button held, led ON solid, counting toward 5 s trigger
-//  TRIGGERED   → emergency sent, led fast-blink indefinitely
-//  CANCELLING  → while TRIGGERED, button held again counting toward 2 s cancel
 // ============================================================================
 
-enum class EmergencyState {
-    IDLE,
-    HOLDING,
-    TRIGGERED,
-    CANCELLING
-};
+enum class EmergencyState { IDLE, HOLDING, TRIGGERED, CANCELLING };
 
-static EmergencyState emergencyState    = EmergencyState::IDLE;
-static unsigned long  emergencyHoldStart = 0;   // when button press began
-static unsigned long  cancelHoldStart    = 0;   // when cancel press began
-static unsigned long  lastEmergencyBlink = 0;   // for fast-blink timing
+static EmergencyState emergencyState     = EmergencyState::IDLE;
+static unsigned long  emergencyHoldStart = 0;
+static unsigned long  cancelHoldStart    = 0;
+static unsigned long  lastEmergencyBlink = 0;
 static bool           emergencyLedState  = false;
 
-// Tuning constants
-static const unsigned long EMERGENCY_HOLD_MS  = 5000;  // hold to trigger
-static const unsigned long CANCEL_HOLD_MS     = 2000;  // hold to cancel
-static const unsigned long EMERGENCY_BLINK_MS = 100;   // fast-blink period
+static const unsigned long EMERGENCY_HOLD_MS  = 5000;
+static const unsigned long CANCEL_HOLD_MS     = 2000;
+static const unsigned long EMERGENCY_BLINK_MS = 100;
+
+// ============================================================================
+// STATE — TELEMETRY
+// ============================================================================
+
+static unsigned long lastTelemetrySend = 0;
+static const unsigned long TELEMETRY_INTERVAL_MS = 60000;   // 60 seconds
+
+// Flag set by onWebSocketConnected so we send telemetry immediately on connect
+static bool sendTelemetryOnConnect = false;
+
+// ============================================================================
+// STATE — DIAGNOSTIC LOGS
+// ============================================================================
+
+// DHT22: print summary every 12 s (= 4 reads × 3 s each)
+static unsigned long lastDhtPrint = 0;
+static const unsigned long DHT_PRINT_INTERVAL_MS = 12000;
+
+// WebSocket heartbeat log (mirrors original 10 s behaviour)
+static unsigned long lastWsStatus = 0;
+static const unsigned long WS_STATUS_INTERVAL_MS = 10000;
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -82,37 +97,44 @@ static const unsigned long EMERGENCY_BLINK_MS = 100;   // fast-blink period
 
 void handleButtonAndRecording();
 void handleEmergencyButton();
+void handleTelemetry();
+void printDhtDiagnostic();
+void printWsStatus();
 void updateWifiLed();
 void updateSocketLed();
+void sendTelemetryNow(const char* reason);
 
 // ============================================================================
 // WEBSOCKET CALLBACKS
 // ============================================================================
 
 void onWebSocketConnected(const char* message) {
-    Serial.println("[App] 🔗 WebSocket connected - Sending TOKEN...");
+    Serial.println("[App] 🔗 WebSocket connected — sending TOKEN...");
     String tokenMsg = "{\"event\":\"TOKEN\",\"user_id\":\"";
     tokenMsg += DEVICE_ID;
     tokenMsg += "\"}";
     webSocket.sendMessage(tokenMsg.c_str());
+
+    // Schedule immediate telemetry push after connect
+    sendTelemetryOnConnect = true;
 }
 
 void onWebSocketDisconnected(const char* message) {
     Serial.println("[App] ❌ WebSocket disconnected");
 
-    // Stop recording if we lose the socket mid-session
     isRecording = false;
     recordingLed.off();
 
-    // If emergency was being held, reset it — socket is gone anyway
     if (emergencyState == EmergencyState::HOLDING) {
         emergencyState = EmergencyState::IDLE;
         emergencyLed.off();
     }
+
+    sendTelemetryOnConnect = false;
 }
 
 void onWebSocketMessage(const char* message) {
-    Serial.printf("[App] 📨 Message received: %s\n", message);
+    Serial.printf("[App] 📨 Message: %s\n", message);
 }
 
 void onWebSocketError(const char* message) {
@@ -124,14 +146,19 @@ void onWebSocketError(const char* message) {
 // ============================================================================
 
 void App::init() {
-    // Serial.begin already called in main.cpp
     delay(1000);
     Serial.println("\n\n[App] 🚀 Initializing Synchora Device...");
 
     Serial.println("[App] 📡 Starting WiFi...");
     wifi.init();
 
-    Serial.println("[App] 🎙️ Starting Mic...");
+    Serial.println("[App] 🌡️  Starting DHT22...");
+    dht.init();
+
+    Serial.println("[App] 🛰️  Starting GPS...");
+    gps.init();
+
+    Serial.println("[App] 🎙️  Starting Mic...");
     mic.init();
 
     Serial.println("[App] 🔌 Starting WebSocket...");
@@ -141,10 +168,9 @@ void App::init() {
     webSocket.onError(onWebSocketError);
     webSocket.init();
 
-    // Ensure emergency LED starts off
     emergencyLed.off();
 
-    Serial.println("[App] ✅ Initialization complete!");
+    Serial.println("[App] ✅ Initialization complete!\n");
 }
 
 // ============================================================================
@@ -155,37 +181,42 @@ void App::run() {
     wifi.reconnectIfNeeded();
     webSocket.run();
 
+    // Sensors — update every loop tick (both are internally throttled)
+    dht.update();
+    gps.update();
+
+    // Features
     handleButtonAndRecording();
     handleEmergencyButton();
+    handleTelemetry();
 
+    // Diagnostic logs
+    printDhtDiagnostic();
+    printWsStatus();
+
+    // LEDs
     updateWifiLed();
     updateSocketLed();
 }
 
 // ============================================================================
-// RECORDING — only active when socket is fully connected
+// RECORDING — socket-gated
 // ============================================================================
 
 void handleButtonAndRecording() {
-
-    // Guard: recording is only allowed when the socket LED is solid ON,
-    // i.e. the WebSocket is fully connected.
     bool socketReady = webSocket.isConnected();
 
     if (button.isPressed()) {
 
         if (!socketReady) {
-            // Socket not ready — ignore button, make sure we are not recording
             if (isRecording) {
                 Serial.println("[App] ⏹️ Socket lost — stopping recording");
                 isRecording = false;
                 recordingLed.off();
-                // Do NOT send END, socket is gone
             }
             return;
         }
 
-        // Socket is ready and button is pressed
         if (!isRecording) {
             Serial.println("[App] 🎙️ Recording started");
             isRecording = true;
@@ -193,7 +224,6 @@ void handleButtonAndRecording() {
             webSocket.sendEvent("START");
         }
 
-        // Stream audio while button is held
         uint8_t buffer[1024];
         int bytes = mic.read(buffer, 512);
         if (bytes > 0) {
@@ -201,138 +231,190 @@ void handleButtonAndRecording() {
         }
 
     } else {
-
         if (isRecording) {
             Serial.println("[App] ⏹️ Recording stopped");
             isRecording = false;
             recordingLed.off();
-            if (socketReady) {
-                webSocket.sendEvent("END");
-            }
+            if (socketReady) webSocket.sendEvent("END");
         }
     }
 }
 
 // ============================================================================
 // EMERGENCY BUTTON STATE MACHINE
-//
-//  IDLE
-//    button pressed  → move to HOLDING, note holdStart, led ON solid
-//    button released → stay IDLE, led off
-//
-//  HOLDING
-//    button still held AND elapsed >= 5 s AND socket connected
-//      → send EMERGENCY_TRIGGER, move to TRIGGERED, led begins fast-blink
-//    button still held AND elapsed >= 5 s AND socket NOT connected
-//      → Serial warning, return to IDLE, led off
-//    button released before 5 s → return to IDLE, led off
-//
-//  TRIGGERED
-//    button pressed → move to CANCELLING, note cancelStart
-//    button not pressed → fast-blink led
-//
-//  CANCELLING
-//    button still held AND elapsed >= 2 s → return to IDLE, led off
-//    button released before 2 s → return to TRIGGERED, resume fast-blink
 // ============================================================================
 
 void handleEmergencyButton() {
-
     bool btnHeld = emergencyButton.isPressed();
     unsigned long now = millis();
 
     switch (emergencyState) {
 
-        // ── IDLE ──────────────────────────────────────────────────────────
         case EmergencyState::IDLE:
-
             if (btnHeld) {
-                emergencyState    = EmergencyState::HOLDING;
+                emergencyState     = EmergencyState::HOLDING;
                 emergencyHoldStart = now;
-                emergencyLed.on();   // solid ON while counting
+                emergencyLed.on();
                 Serial.println("[Emergency] 🟡 Button held — counting to 5 s...");
             } else {
                 emergencyLed.off();
             }
             break;
 
-        // ── HOLDING ───────────────────────────────────────────────────────
         case EmergencyState::HOLDING:
-
             if (!btnHeld) {
-                // Released before 5 s — abort
                 emergencyState = EmergencyState::IDLE;
                 emergencyLed.off();
-                Serial.println("[Emergency] ⬜ Button released early — aborted.");
+                Serial.println("[Emergency] ⬜ Released early — aborted.");
                 break;
             }
-
-            // Still held — check elapsed time
             if (now - emergencyHoldStart >= EMERGENCY_HOLD_MS) {
-
                 if (!webSocket.isConnected()) {
                     Serial.println("[Emergency] ❌ Socket not connected — cannot trigger!");
                     emergencyState = EmergencyState::IDLE;
                     emergencyLed.off();
                     break;
                 }
-
-                // Trigger!
-                Serial.println("[Emergency] 🚨 5 s hold complete — triggering emergency!");
+                Serial.println("[Emergency] 🚨 TRIGGERED — sending EMERGENCY_TRIGGER");
                 webSocket.sendMessage("{\"event\":\"EMERGENCY_TRIGGER\"}");
-
                 emergencyState     = EmergencyState::TRIGGERED;
                 emergencyLedState  = false;
                 lastEmergencyBlink = now;
-                // LED will start fast-blinking in TRIGGERED block below
             }
-            // else: still counting, LED remains solid ON
             break;
 
-        // ── TRIGGERED ─────────────────────────────────────────────────────
         case EmergencyState::TRIGGERED:
-
-            // Fast-blink the emergency LED
             if (now - lastEmergencyBlink >= EMERGENCY_BLINK_MS) {
                 lastEmergencyBlink = now;
                 emergencyLedState  = !emergencyLedState;
                 emergencyLedState ? emergencyLed.on() : emergencyLed.off();
             }
-
-            // Watch for cancel press
             if (btnHeld) {
                 emergencyState  = EmergencyState::CANCELLING;
                 cancelHoldStart = now;
-                Serial.println("[Emergency] 🔵 Cancel hold detected — counting to 2 s...");
+                Serial.println("[Emergency] 🔵 Cancel hold — counting to 2 s...");
             }
             break;
 
-        // ── CANCELLING ────────────────────────────────────────────────────
         case EmergencyState::CANCELLING:
-
             if (!btnHeld) {
-                // Released before 2 s — go back to fast-blinking
                 emergencyState     = EmergencyState::TRIGGERED;
                 lastEmergencyBlink = now;
-                Serial.println("[Emergency] 🔄 Cancel released early — resuming blink.");
+                Serial.println("[Emergency] 🔄 Released early — resuming blink.");
                 break;
             }
-
-            // Still held for cancel — keep fast-blinking during count
+            // Keep fast-blinking during cancel count
             if (now - lastEmergencyBlink >= EMERGENCY_BLINK_MS) {
                 lastEmergencyBlink = now;
                 emergencyLedState  = !emergencyLedState;
                 emergencyLedState ? emergencyLed.on() : emergencyLed.off();
             }
-
             if (now - cancelHoldStart >= CANCEL_HOLD_MS) {
-                // Cancel confirmed — return to IDLE
                 emergencyState = EmergencyState::IDLE;
                 emergencyLed.off();
-                Serial.println("[Emergency] ✅ Emergency cancelled — returning to normal.");
+                Serial.println("[Emergency] ✅ Cancelled — returning to normal.");
             }
             break;
     }
+}
+
+// ============================================================================
+// TELEMETRY — 60 s interval + immediate on connect + event-driven GPS lock
+// ============================================================================
+
+void sendTelemetryNow(const char* reason) {
+    if (!webSocket.isConnected()) return;
+
+    float temp = dht.temperature();
+    float hum  = dht.humidity();
+    float lat  = gps.hasFix() ? gps.latitude()  : 0.0f;
+    float lng  = gps.hasFix() ? gps.longitude() : 0.0f;
+
+    // Build JSON manually — avoids pulling in ArduinoJson dependency
+    char payload[200];
+    snprintf(payload, sizeof(payload),
+        "{\"event\":\"TELEMETRY_UPDATE\","
+        "\"temperature\":%.2f,"
+        "\"humidity\":%.2f,"
+        "\"latitude\":%.6f,"
+        "\"longitude\":%.6f}",
+        temp, hum, lat, lng
+    );
+
+    Serial.printf("[Telemetry] 📤 Sending (%s) — T=%.1f°C  H=%.1f%%  Lat=%.6f  Lng=%.6f\n",
+                  reason, temp, hum, lat, lng);
+
+    webSocket.sendMessage(payload);
+    lastTelemetrySend = millis();
+}
+
+void handleTelemetry() {
+    unsigned long now = millis();
+
+    // On-connect push (flag set by onWebSocketConnected)
+    if (sendTelemetryOnConnect) {
+        sendTelemetryOnConnect = false;
+        sendTelemetryNow("on-connect");
+        return;
+    }
+
+    // Event-driven: GPS just got its first fix this session
+    if (gps.justGotFix()) {
+        sendTelemetryNow("gps-lock");
+        return;
+    }
+
+    // Regular 60 s interval
+    if (now - lastTelemetrySend >= TELEMETRY_INTERVAL_MS) {
+        sendTelemetryNow("interval-60s");
+    }
+}
+
+// ============================================================================
+// DIAGNOSTIC — DHT22 summary every 12 s
+// ============================================================================
+
+void printDhtDiagnostic() {
+    unsigned long now = millis();
+    if (now - lastDhtPrint < DHT_PRINT_INTERVAL_MS) return;
+    lastDhtPrint = now;
+
+    Serial.println("┌─────────────────────────────────┐");
+    Serial.println("│         DHT22 Diagnostic         │");
+
+    if (dht.hasValidData()) {
+        Serial.printf( "│  Temperature : %6.1f °C         │\n", dht.temperature());
+        Serial.printf( "│  Humidity    : %6.1f %%          │\n", dht.humidity());
+    } else {
+        Serial.println("│  ⚠️  No valid reading yet        │");
+    }
+
+    Serial.printf(  "│  GPS Fix     : %s              │\n",
+                    gps.hasFix() ? "✅ YES" : "❌ NO ");
+    if (gps.hasFix()) {
+        Serial.printf("│  Sats        : %-3d               │\n", gps.satellites());
+        Serial.printf("│  Lat         : %10.6f       │\n", gps.latitude());
+        Serial.printf("│  Lng         : %10.6f       │\n", gps.longitude());
+    } else {
+        Serial.printf("│  Sats in view: %-3d               │\n", gps.satellites());
+    }
+
+    Serial.println("└─────────────────────────────────┘");
+}
+
+// ============================================================================
+// DIAGNOSTIC — WebSocket heartbeat every 10 s
+// ============================================================================
+
+void printWsStatus() {
+    unsigned long now = millis();
+    if (now - lastWsStatus < WS_STATUS_INTERVAL_MS) return;
+    lastWsStatus = now;
+
+    Serial.printf("[WebSocket] State: %s  WiFi: %s\n",
+        webSocket.isConnected() ? "CONNECTED" : "DISCONNECTED",
+        wifi.isConnected()      ? "OK"        : "DOWN"
+    );
 }
 
 // ============================================================================
@@ -353,7 +435,7 @@ void updateWifiLed() {
 
 void updateSocketLed() {
     if (webSocket.isConnected()) {
-        socketConnectedLed.on();    // solid ON = socket ready, recording allowed
+        socketConnectedLed.on();
     } else {
         if (millis() - lastSocketBlink > 500) {
             lastSocketBlink = millis();
