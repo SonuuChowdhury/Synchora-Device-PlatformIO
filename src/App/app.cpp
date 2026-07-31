@@ -5,6 +5,7 @@
 #include "../drivers/led.h"
 #include "../drivers/button.h"
 #include "../drivers/mic.h"
+#include "../drivers/speaker.h"
 #include "../drivers/dht.h"
 #include "../drivers/gps.h"
 #include "../services/wifiService.h"
@@ -23,6 +24,7 @@ static Button button(RECORDING_BUTTON_PIN);
 static Button emergencyButton(EMERGENCY_BUTTON_PIN);
 
 static Mic       mic;
+static Speaker   speaker;
 static DhtSensor dht;
 static GpsSensor gps;
 
@@ -98,11 +100,20 @@ static const unsigned long WS_STATUS_INTERVAL_MS = 10000;
 void handleButtonAndRecording();
 void handleEmergencyButton();
 void handleTelemetry();
+void handleNotReadyBeep();
+void handleIntroPlayback();
 void printDhtDiagnostic();
 void printWsStatus();
 void updateWifiLed();
 void updateSocketLed();
 void sendTelemetryNow(const char* reason);
+
+// ============================================================================
+// STATE — INTRO PLAYBACK
+// ============================================================================
+
+static unsigned long playIntroTimer   = 0;
+static bool          playIntroPending = false;
 
 // ============================================================================
 // WEBSOCKET CALLBACKS
@@ -117,6 +128,10 @@ void onWebSocketConnected(const char* message) {
 
     // Schedule immediate telemetry push after connect
     sendTelemetryOnConnect = true;
+
+    // Schedule introduction playback 1 second after connect
+    playIntroTimer   = millis();
+    playIntroPending = true;
 }
 
 void onWebSocketDisconnected(const char* message) {
@@ -131,10 +146,15 @@ void onWebSocketDisconnected(const char* message) {
     }
 
     sendTelemetryOnConnect = false;
+    playIntroPending = false;
 }
 
 void onWebSocketMessage(const char* message) {
     Serial.printf("[App] 📨 Message: %s\n", message);
+}
+
+void onWebSocketBinary(const uint8_t* payload, size_t length) {
+    speaker.write(payload, length);
 }
 
 void onWebSocketError(const char* message) {
@@ -152,6 +172,9 @@ void App::init() {
     Serial.println("[App] 📡 Starting WiFi...");
     wifi.init();
 
+    Serial.println("[App] 🔊 Starting Speaker (MAX98357A)...");
+    speaker.init();
+
     Serial.println("[App] 🌡️  Starting DHT22...");
     dht.init();
 
@@ -165,6 +188,7 @@ void App::init() {
     webSocket.onConnected(onWebSocketConnected);
     webSocket.onDisconnected(onWebSocketDisconnected);
     webSocket.onMessage(onWebSocketMessage);
+    webSocket.onBinary(onWebSocketBinary);
     webSocket.onError(onWebSocketError);
     webSocket.init();
 
@@ -189,6 +213,8 @@ void App::run() {
     handleButtonAndRecording();
     handleEmergencyButton();
     handleTelemetry();
+    handleNotReadyBeep();
+    handleIntroPlayback();
 
     // Diagnostic logs
     printDhtDiagnostic();
@@ -197,6 +223,38 @@ void App::run() {
     // LEDs
     updateWifiLed();
     updateSocketLed();
+}
+
+// ============================================================================
+// INTRO PLAYBACK — 1.0s after WebSocket connection
+// ============================================================================
+
+void handleIntroPlayback() {
+    if (playIntroPending && (millis() - playIntroTimer >= 1000)) {
+        playIntroPending = false;
+        Serial.println("[App] 🔊 1.0s after connection — requesting PLAY_INTRO from server...");
+        webSocket.sendMessage("{\"event\":\"PLAY_INTRO\"}");
+    }
+}
+
+// ============================================================================
+// NOT READY STATUS BEEP — plays soft status pip every 1.5s while connecting
+// ============================================================================
+
+static unsigned long lastNotReadyBeep = 0;
+
+void handleNotReadyBeep() {
+    // Silence status beep during active Emergency SOS
+    if (emergencyState != EmergencyState::IDLE) return;
+
+    bool isReady = wifi.isConnected() && webSocket.isConnected();
+    if (!isReady) {
+        unsigned long now = millis();
+        if (now - lastNotReadyBeep >= 2000) {
+            lastNotReadyBeep = now;
+            speaker.playNotReadyBeep();
+        }
+    }
 }
 
 // ============================================================================
@@ -244,6 +302,8 @@ void handleButtonAndRecording() {
 // EMERGENCY BUTTON STATE MACHINE
 // ============================================================================
 
+static unsigned long lastEmergencyMelody = 0;
+
 void handleEmergencyButton() {
     bool btnHeld = emergencyButton.isPressed();
     unsigned long now = millis();
@@ -277,18 +337,28 @@ void handleEmergencyButton() {
                 }
                 Serial.println("[Emergency] 🚨 TRIGGERED — sending EMERGENCY_TRIGGER");
                 webSocket.sendMessage("{\"event\":\"EMERGENCY_TRIGGER\"}");
+                speaker.playSiren();
                 emergencyState     = EmergencyState::TRIGGERED;
                 emergencyLedState  = false;
                 lastEmergencyBlink = now;
+                lastEmergencyMelody = 0; // Play melody immediately
             }
             break;
 
         case EmergencyState::TRIGGERED:
-            if (now - lastEmergencyBlink >= EMERGENCY_BLINK_MS) {
+            // 4 blinks per second = 125 ms toggle interval
+            if (now - lastEmergencyBlink >= 125) {
                 lastEmergencyBlink = now;
                 emergencyLedState  = !emergencyLedState;
                 emergencyLedState ? emergencyLed.on() : emergencyLed.off();
             }
+
+            // Play emergency alarm sound every 1.0 s while active
+            if (now - lastEmergencyMelody >= 1000) {
+                lastEmergencyMelody = now;
+                speaker.playEmergencyAlarm();
+            }
+
             if (btnHeld) {
                 emergencyState  = EmergencyState::CANCELLING;
                 cancelHoldStart = now;
@@ -303,15 +373,23 @@ void handleEmergencyButton() {
                 Serial.println("[Emergency] 🔄 Released early — resuming blink.");
                 break;
             }
-            // Keep fast-blinking during cancel count
-            if (now - lastEmergencyBlink >= EMERGENCY_BLINK_MS) {
+            // 2 blinks per second = 250 ms toggle interval during cancel count
+            if (now - lastEmergencyBlink >= 250) {
                 lastEmergencyBlink = now;
                 emergencyLedState  = !emergencyLedState;
                 emergencyLedState ? emergencyLed.on() : emergencyLed.off();
             }
+
+            // Keep playing emergency alarm while holding to cancel
+            if (now - lastEmergencyMelody >= 1000) {
+                lastEmergencyMelody = now;
+                speaker.playEmergencyAlarm();
+            }
+
             if (now - cancelHoldStart >= CANCEL_HOLD_MS) {
                 emergencyState = EmergencyState::IDLE;
                 emergencyLed.off();
+                speaker.stop();
                 Serial.println("[Emergency] ✅ Cancelled — returning to normal.");
             }
             break;

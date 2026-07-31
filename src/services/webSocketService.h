@@ -10,6 +10,7 @@ enum class WebSocketEvent {
 };
 
 typedef void (*WebSocketCallbackFn)(const char* message);
+typedef void (*WebSocketBinaryCallbackFn)(const uint8_t* payload, size_t length);
 
 void webSocketEventHandler(WStype_t type, uint8_t* payload, size_t length);
 
@@ -26,6 +27,7 @@ public:
     void onConnected(WebSocketCallbackFn callback);
     void onDisconnected(WebSocketCallbackFn callback);
     void onMessage(WebSocketCallbackFn callback);
+    void onBinary(WebSocketBinaryCallbackFn callback);
     void onError(WebSocketCallbackFn callback);
 
     static WebSocketService* _instance;
@@ -37,5 +39,6 @@ private:
     WebSocketCallbackFn _onConnectedCb = nullptr;
     WebSocketCallbackFn _onDisconnectedCb = nullptr;
     WebSocketCallbackFn _onMessageCb = nullptr;
+    WebSocketBinaryCallbackFn _onBinaryCb = nullptr;
     WebSocketCallbackFn _onErrorCb = nullptr;
 };

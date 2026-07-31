@@ -3,13 +3,9 @@
 #include "wifiService.h"
 
 void WifiService::init() {
+    Serial.printf("[WiFi] 📡 Connecting to SSID: %s ...\n", WIFI_SSID);
+    WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    Serial.print("[WiFi] Connecting");
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.printf("\n[WiFi] ✅ Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 }
 
 bool WifiService::isConnected() {
@@ -18,27 +14,25 @@ bool WifiService::isConnected() {
 
 void WifiService::reconnectIfNeeded() {
     static unsigned long lastCheck = 0;
+    static bool wasConnected = false;
 
-    // Only check every 5 seconds to avoid hammering WiFi stack
-    if (millis() - lastCheck < 5000) return;
-    lastCheck = millis();
+    bool currentlyConnected = (WiFi.status() == WL_CONNECTED);
 
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[WiFi] ⚠️ Connection lost — reconnecting...");
-        WiFi.disconnect();
-        WiFi.begin(WIFI_SSID, WIFI_PASS);
+    if (currentlyConnected && !wasConnected) {
+        wasConnected = true;
+        Serial.printf("\n[WiFi] ✅ Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    } else if (!currentlyConnected && wasConnected) {
+        wasConnected = false;
+        Serial.println("\n[WiFi] ⚠️ Connection lost!");
+    }
 
-        // Wait up to 10 seconds for reconnect
-        unsigned long start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-            delay(500);
-            Serial.print(".");
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("\n[WiFi] ✅ Reconnected! IP: %s\n", WiFi.localIP().toString().c_str());
-        } else {
-            Serial.println("\n[WiFi] ❌ Reconnect failed, will retry...");
+    // Check reconnection every 10 seconds if disconnected
+    if (!currentlyConnected) {
+        if (millis() - lastCheck > 10000) {
+            lastCheck = millis();
+            Serial.println("[WiFi] 🔄 Attempting reconnect...");
+            WiFi.disconnect();
+            WiFi.begin(WIFI_SSID, WIFI_PASS);
         }
     }
 }

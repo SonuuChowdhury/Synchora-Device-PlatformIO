@@ -555,7 +555,7 @@ FILE: src\config\webSocket.h
 
 #pragma once
 
-#define WEBSOCKET_URL  "ws://b8ed-2401-4900-1c01-a580-1583-2594-660f-fe14.ngrok-free.app"
+#define WEBSOCKET_URL  "ws://adc2-2409-40e0-1015-cdb2-20f7-407e-eb9f-232d.ngrok-free.app"
 #define WEBSOCKET_PORT 80
 #define WEBSOCKET_PATH "/"
 

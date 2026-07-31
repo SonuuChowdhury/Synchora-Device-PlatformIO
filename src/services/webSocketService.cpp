@@ -40,7 +40,9 @@ void webSocketEventHandler(WStype_t type, uint8_t* payload, size_t length) {
         }
 
         case WStype_BIN:
-            Serial.println("[WebSocket] 🔲 Binary data received");
+            if (svc->_onBinaryCb) {
+                svc->_onBinaryCb(payload, length);
+            }
             break;
 
         case WStype_ERROR:
@@ -149,4 +151,5 @@ void WebSocketService::sendBinary(const uint8_t* data, size_t length) {
 void WebSocketService::onConnected(WebSocketCallbackFn cb)    { _onConnectedCb = cb; }
 void WebSocketService::onDisconnected(WebSocketCallbackFn cb) { _onDisconnectedCb = cb; }
 void WebSocketService::onMessage(WebSocketCallbackFn cb)      { _onMessageCb = cb; }
+void WebSocketService::onBinary(WebSocketBinaryCallbackFn cb)  { _onBinaryCb = cb; }
 void WebSocketService::onError(WebSocketCallbackFn cb)        { _onErrorCb = cb; }

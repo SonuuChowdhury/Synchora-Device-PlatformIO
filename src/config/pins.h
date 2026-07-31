@@ -12,3 +12,8 @@
 #define DHT22_PIN                5
 #define GPS_RX_PIN               16
 #define GPS_TX_PIN               17            
+
+// MAX98357A I2S Speaker Amplifier Pins
+#define SPEAKER_LRC_PIN  25
+#define SPEAKER_BCLK_PIN 27
+#define SPEAKER_DIN_PIN  33

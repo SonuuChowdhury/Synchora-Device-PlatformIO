@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+ INSTRUCTIONS FOR FUTURE AI AGENTS / DEVELOPERS EDITING THIS FILE
+================================================================================
+
+WHAT THIS FILE IS
+  A static, self-contained circuit schematic for the Synchora ESP32 wearable
+  device. It is plain HTML + inline SVG + inline CSS — no build step, no JS
+  framework, no external assets. It renders correctly by just opening it in
+  any browser.
+
+SOURCE OF TRUTH FOR PIN NUMBERS / WIRING
+  Every pin number and connection shown here was derived from the firmware
+  source, specifically:
+    - config/pins.h            -> exact GPIO numbers (this is the ground truth)
+    - config/deviceConfig.h    -> DEVICE_ID string shown in the info panel
+    - config/wifiConfig.h      -> WiFi SSID shown (password intentionally
+                                   NOT reproduced here — do not add it)
+    - config/webSocket.h       -> WebSocket URL shown in the info panel
+    - drivers/dht.cpp, gps.cpp, mic.cpp, led.cpp, button.cpp
+                                -> how each peripheral is wired/used
+                                   (e.g. DHT22 needs a pull-up, GPS is
+                                   HardwareSerial2, mic is I2S with L/R->GND)
+  If pins.h or any config file changes in the codebase, THIS FILE IS NOW
+  STALE and should be regenerated/updated to match — silently leaving it
+  out of sync with the firmware is worse than deleting it.
+
+THE DIAGRAM ITSELF IS GENERATED, NOT HAND-DRAWN
+  The <svg>...</svg> block inside the ".diagram-shell" <div> below was
+  produced by a companion script, `circuit_generator.py`, shipped alongside
+  this HTML file. DO NOT hand-edit coordinates inside the <svg> block for
+  anything beyond a trivial text/color tweak — for any structural change
+  (new pin, new peripheral, new wire), edit circuit_generator.py, re-run it,
+  and paste the freshly generated SVG back in here. circuit_generator.py has
+  its own detailed header comment explaining the coordinate system, color
+  coding, and step-by-step instructions for adding new components.
+
+WHEN A PIN / COMPONENT CHANGES, UPDATE ALL THREE OF THESE IN LOCKSTEP
+  1. The SVG diagram (via circuit_generator.py, see above)
+  2. The "GPIO Pin Map" tables further down this file (two <table> elements,
+     one per side of the diagram: human-interface pins vs. sensor pins)
+  3. The "Peripheral Power & Ground" table (component-level VCC/GND notes)
+  These three currently agree with each other and with config/pins.h as of
+  the last edit — keep that invariant true.
+
+STYLING CONVENTIONS
+  Colors are defined once as CSS custom properties in :root (--v3, --gnd,
+  --uart, --i2s, --accent, etc.) and reused in both the page chrome and the
+  SVG's inline fill/stroke attributes. If you rebrand or add a new signal
+  type (e.g. I2C), add a new CSS variable AND a new color constant in
+  circuit_generator.py so the page and diagram stay visually consistent,
+  and add a matching row to the SVG legend.
+
+WHAT NOT TO DO
+  - Don't reproduce the real WiFi password (wifiConfig.h) anywhere in this
+    file if you regenerate or extend it.
+  - Don't replace the generated SVG with a raster image (PNG/JPG) — the
+    whole point of this deliverable is that it stays text/code, so IDE AI
+    agents and version control can diff and edit it like any other source
+    file.
+================================================================================
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synchora &mdash; ESP32 Circuit Schematic</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2e;
+    --panel-edge: #2a3a5c;
+    --text-main: #e8edf9;
+    --text-dim: #7f8cab;
+    --text-label: #a9b6d6;
+    --accent: #39c5ff;
+    --v3: #ff5d73;
+    --v5: #ff9f43;
+    --gnd: #8ba3c7;
+    --uart: #ffd166;
+    --i2s: #c792ea;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--text-main);
+    font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+  }
+  .wrap {
+    max-width: 1900px;
+    margin: 0 auto;
+    padding: 28px 24px 60px;
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 12px;
+    border-bottom: 1px solid var(--panel-edge);
+    padding-bottom: 18px;
+    margin-bottom: 26px;
+  }
+  header .brand {
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+  }
+  header h1 {
+    margin: 4px 0 0;
+    font-size: 26px;
+    letter-spacing: 0.02em;
+  }
+  header .meta {
+    text-align: right;
+    font-size: 12.5px;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+  .scroll-hint {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin: 0 0 10px;
+  }
+  .diagram-shell {
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 16px;
+    padding: 10px;
+    overflow-x: auto;
+  }
+  .diagram-shell svg {
+    display: block;
+    width: 100%;
+    min-width: 1400px;
+    height: auto;
+  }
+  section.tables {
+    margin-top: 40px;
+  }
+  section.tables h2 {
+    font-size: 15px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-label);
+    border-left: 3px solid var(--accent);
+    padding-left: 10px;
+    margin: 36px 0 14px;
+  }
+  .grid-two {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+  }
+  @media (max-width: 1000px) {
+    .grid-two { grid-template-columns: 1fr; }
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 10px;
+    overflow: hidden;
+    font-size: 13.5px;
+  }
+  thead th {
+    text-align: left;
+    background: #17233d;
+    color: var(--text-label);
+    font-weight: 700;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid #1b2740;
+    color: var(--text-main);
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  .pin {
+    font-weight: 700;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+  }
+  .tag.gpio { color: var(--accent); }
+  .tag.uart { color: var(--uart); }
+  .tag.i2s  { color: var(--i2s); }
+  .tag.pwr  { color: var(--v3); }
+  footer {
+    margin-top: 40px;
+    padding-top: 18px;
+    border-top: 1px solid var(--panel-edge);
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="brand">Firmware-derived hardware reference</div>
+      <h1>Synchora Device &mdash; Full Circuit Schematic</h1>
+    </div>
+    <div class="meta">
+      MCU: ESP32 DevKit-V1 &middot; Generated from <code>config/pins.h</code><br>
+      12 GPIOs in use &middot; 4 LEDs &middot; 2 buttons &middot; 3 sensor peripherals
+    </div>
+  </header>
+
+  <p class="scroll-hint">Scroll horizontally on small screens &mdash; the schematic is wide by design so every wire stays legible.</p>
+
+  <div class="diagram-shell">
+<svg viewBox="0 0 1800 1120" xmlns="http://www.w3.org/2000/svg" font-family="'JetBrains Mono','Fira Code',monospace">
+<rect width="1800" height="1120" fill="#0b1220"/>
+<defs>
+<pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M 32 0 L 0 0 0 32" fill="none" stroke="#141d31" stroke-width="1"/></pattern>
+<marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#a9b6d6"/></marker>
+</defs>
+<rect width="1800" height="1120" fill="url(#grid)"/>
+<text x="900.0" y="42" font-family="'JetBrains Mono','Fira Code',monospace" font-size="24" fill="#e8edf9" text-anchor="middle" font-weight="700" style="">SYNCHORA — ESP32 WEARABLE DEVICE  —  FULL CIRCUIT SCHEMATIC</text>
+<text x="900.0" y="66" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#7f8cab" text-anchor="middle" font-weight="400" style="">Auto-generated from firmware pin map (config/pins.h)  •  MCU: ESP32 DevKit</text>
+<line x1="60" y1="108" x2="1740" y2="108" stroke="#ff5d73" stroke-width="4" stroke-linecap="round"/>
+<line x1="60" y1="908" x2="1740" y2="908" stroke="#8ba3c7" stroke-width="4" stroke-linecap="round"/>
+<text x="70" y="96" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#ff5d73" text-anchor="start" font-weight="700" style="">3V3 POWER BUS</text>
+<text x="70" y="932" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#8ba3c7" text-anchor="start" font-weight="700" style="">GND BUS (COMMON GROUND)</text>
+<line x1="820" y1="108" x2="820" y2="200" stroke="#ff5d73" stroke-width="3" stroke-linecap="round"/>
+<circle cx="820" cy="108" r="4.5" fill="#ff5d73"/>
+<text x="820" y="190" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ff5d73" text-anchor="middle" font-weight="700" style="">3V3</text>
+<line x1="870" y1="908" x2="870" y2="800" stroke="#8ba3c7" stroke-width="3" stroke-linecap="round"/>
+<circle cx="870" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="870" y="818" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#8ba3c7" text-anchor="middle" font-weight="700" style="">GND</text>
+<line x1="850" y1="908" x2="850" y2="800" stroke="#ff9f43" stroke-width="3" stroke-linecap="round" stroke-dasharray="5,4"/>
+<circle cx="850" cy="908" r="4.5" fill="#ff9f43"/>
+<text x="850" y="818" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ff9f43" text-anchor="middle" font-weight="700" style="">VIN</text>
+<rect x="780" y="200" width="240" height="600" rx="14" fill="#132038" stroke="#4f7cff" stroke-width="2.4"/>
+<text x="900.0" y="234" font-family="'JetBrains Mono','Fira Code',monospace" font-size="20" fill="#e8edf9" text-anchor="middle" font-weight="700" style="">ESP32 DevKit-V1</text>
+<text x="900.0" y="256" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#7f8cab" text-anchor="middle" font-weight="400" style="">(30-pin — pins not in use are hidden)</text>
+<circle cx="804" cy="224" r="5" fill="#243554"/>
+<line x1="780" y1="260" x2="700" y2="260" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="780" cy="260" r="3.5" fill="#39c5ff"/>
+<text x="692" y="265" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="end" font-weight="700" style="">GPIO2</text>
+<line x1="780" y1="360" x2="700" y2="360" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="780" cy="360" r="3.5" fill="#39c5ff"/>
+<text x="692" y="365" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="end" font-weight="700" style="">GPIO4</text>
+<line x1="780" y1="460" x2="700" y2="460" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="780" cy="460" r="3.5" fill="#39c5ff"/>
+<text x="692" y="465" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="end" font-weight="700" style="">GPIO14</text>
+<line x1="780" y1="560" x2="700" y2="560" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="780" cy="560" r="3.5" fill="#39c5ff"/>
+<text x="692" y="565" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="end" font-weight="700" style="">GPIO22</text>
+<line x1="780" y1="660" x2="700" y2="660" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="780" cy="660" r="3.5" fill="#39c5ff"/>
+<text x="692" y="665" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="end" font-weight="700" style="">GPIO13</text>
+<line x1="780" y1="760" x2="700" y2="760" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="780" cy="760" r="3.5" fill="#39c5ff"/>
+<text x="692" y="765" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="end" font-weight="700" style="">GPIO23</text>
+<line x1="1020" y1="260" x2="1100" y2="260" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="1020" cy="260" r="3.5" fill="#39c5ff"/>
+<text x="1108" y="265" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#39c5ff" text-anchor="start" font-weight="700" style="">GPIO5</text>
+<line x1="1020" y1="360" x2="1100" y2="360" stroke="#ffd166" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="1020" cy="360" r="3.5" fill="#ffd166"/>
+<text x="1108" y="365" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#ffd166" text-anchor="start" font-weight="700" style="">GPIO16</text>
+<line x1="1020" y1="460" x2="1100" y2="460" stroke="#ffd166" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="1020" cy="460" r="3.5" fill="#ffd166"/>
+<text x="1108" y="465" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#ffd166" text-anchor="start" font-weight="700" style="">GPIO17</text>
+<line x1="1020" y1="560" x2="1100" y2="560" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="1020" cy="560" r="3.5" fill="#c792ea"/>
+<text x="1108" y="565" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#c792ea" text-anchor="start" font-weight="700" style="">GPIO15</text>
+<line x1="1020" y1="660" x2="1100" y2="660" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="1020" cy="660" r="3.5" fill="#c792ea"/>
+<text x="1108" y="665" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#c792ea" text-anchor="start" font-weight="700" style="">GPIO26</text>
+<line x1="1020" y1="760" x2="1100" y2="760" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="1020" cy="760" r="3.5" fill="#c792ea"/>
+<text x="1108" y="765" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#c792ea" text-anchor="start" font-weight="700" style="">GPIO32</text>
+<text x="360" y="168" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#a9b6d6" text-anchor="middle" font-weight="700" style="">HUMAN INTERFACE — STATUS LEDs &amp; BUTTONS</text>
+<line x1="700" y1="260" x2="576" y2="260" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<polygon points="575,245 575,275 545,260" fill="#5eead4" fill-opacity="0.85" stroke="#5eead4" stroke-width="1.5"/>
+<line x1="545" y1="245" x2="545" y2="275" stroke="#5eead4" stroke-width="3" stroke-linecap="round"/>
+<line x1="523" y1="239.4" x2="533" y2="229.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="533" y1="241.4" x2="543" y2="231.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="544" y1="260" x2="462" y2="260" stroke="#5eead4" stroke-width="2.4" stroke-linecap="round"/>
+<polyline points="398.0,260 408.6666666666667,268.0 419.3333333333333,252.0 430.0,268.0 440.6666666666667,252.0 451.3333333333333,268.0 462.0,252.0 462.0,260" fill="none" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="430" y="244.0" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="middle" font-weight="400" style="">220Ω</text>
+<line x1="398" y1="260" x2="300" y2="260" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="300" y1="260" x2="300" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="300" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="692" y="240" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#e8edf9" text-anchor="end" font-weight="700" style="">WiFi Status LED  (D1, blinks while connecting)</text>
+<line x1="700" y1="360" x2="576" y2="360" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<polygon points="575,345 575,375 545,360" fill="#5eead4" fill-opacity="0.85" stroke="#5eead4" stroke-width="1.5"/>
+<line x1="545" y1="345" x2="545" y2="375" stroke="#5eead4" stroke-width="3" stroke-linecap="round"/>
+<line x1="523" y1="339.4" x2="533" y2="329.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="533" y1="341.4" x2="543" y2="331.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="544" y1="360" x2="462" y2="360" stroke="#5eead4" stroke-width="2.4" stroke-linecap="round"/>
+<polyline points="398.0,360 408.6666666666667,368.0 419.3333333333333,352.0 430.0,368.0 440.6666666666667,352.0 451.3333333333333,368.0 462.0,352.0 462.0,360" fill="none" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="430" y="344.0" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="middle" font-weight="400" style="">220Ω</text>
+<line x1="398" y1="360" x2="300" y2="360" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="300" y1="360" x2="300" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="300" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="692" y="340" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#e8edf9" text-anchor="end" font-weight="700" style="">Recording LED  (D2, on while capturing audio)</text>
+<line x1="700" y1="460" x2="576" y2="460" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<polygon points="575,445 575,475 545,460" fill="#5eead4" fill-opacity="0.85" stroke="#5eead4" stroke-width="1.5"/>
+<line x1="545" y1="445" x2="545" y2="475" stroke="#5eead4" stroke-width="3" stroke-linecap="round"/>
+<line x1="523" y1="439.4" x2="533" y2="429.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="533" y1="441.4" x2="543" y2="431.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="544" y1="460" x2="462" y2="460" stroke="#5eead4" stroke-width="2.4" stroke-linecap="round"/>
+<polyline points="398.0,460 408.6666666666667,468.0 419.3333333333333,452.0 430.0,468.0 440.6666666666667,452.0 451.3333333333333,468.0 462.0,452.0 462.0,460" fill="none" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="430" y="444.0" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="middle" font-weight="400" style="">220Ω</text>
+<line x1="398" y1="460" x2="300" y2="460" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="300" y1="460" x2="300" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="300" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="692" y="440" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#e8edf9" text-anchor="end" font-weight="700" style="">Socket Connected LED  (D3, solid = WS linked)</text>
+<line x1="700" y1="560" x2="576" y2="560" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<polygon points="575,545 575,575 545,560" fill="#5eead4" fill-opacity="0.85" stroke="#5eead4" stroke-width="1.5"/>
+<line x1="545" y1="545" x2="545" y2="575" stroke="#5eead4" stroke-width="3" stroke-linecap="round"/>
+<line x1="523" y1="539.4" x2="533" y2="529.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="533" y1="541.4" x2="543" y2="531.4" stroke="#5eead4" stroke-width="1.4"/>
+<line x1="544" y1="560" x2="462" y2="560" stroke="#5eead4" stroke-width="2.4" stroke-linecap="round"/>
+<polyline points="398.0,560 408.6666666666667,568.0 419.3333333333333,552.0 430.0,568.0 440.6666666666667,552.0 451.3333333333333,568.0 462.0,552.0 462.0,560" fill="none" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="430" y="544.0" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="middle" font-weight="400" style="">220Ω</text>
+<line x1="398" y1="560" x2="300" y2="560" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="300" y1="560" x2="300" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="300" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="692" y="540" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#e8edf9" text-anchor="end" font-weight="700" style="">Emergency LED  (D4, fast-blink = SOS armed)</text>
+<line x1="700" y1="660" x2="586" y2="660" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="538" y1="660" x2="552" y2="660" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="568" y1="660" x2="582" y2="660" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="552" y1="669" x2="570" y2="649" stroke="#e8edf9" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="552" cy="660" r="3" fill="#e8edf9"/>
+<circle cx="568" cy="660" r="3" fill="#e8edf9"/>
+<line x1="556" y1="644" x2="556" y2="636" stroke="#e8edf9" stroke-width="2"/>
+<line x1="572" y1="644" x2="572" y2="636" stroke="#e8edf9" stroke-width="2"/>
+<line x1="534" y1="660" x2="430" y2="660" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="430" y1="660" x2="430" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="430" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="692" y="640" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#e8edf9" text-anchor="end" font-weight="700" style="">Recording Button  (SW1)</text>
+<text x="692" y="694" font-family="'JetBrains Mono','Fira Code',monospace" font-size="11.5" fill="#7f8cab" text-anchor="end" font-weight="400" style="">INPUT_PULLUP — pressed = LOW, other leg → GND</text>
+<line x1="700" y1="760" x2="586" y2="760" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="538" y1="760" x2="552" y2="760" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="568" y1="760" x2="582" y2="760" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="552" y1="769" x2="570" y2="749" stroke="#e8edf9" stroke-width="2.6" stroke-linecap="round"/>
+<circle cx="552" cy="760" r="3" fill="#e8edf9"/>
+<circle cx="568" cy="760" r="3" fill="#e8edf9"/>
+<line x1="556" y1="744" x2="556" y2="736" stroke="#e8edf9" stroke-width="2"/>
+<line x1="572" y1="744" x2="572" y2="736" stroke="#e8edf9" stroke-width="2"/>
+<line x1="534" y1="760" x2="430" y2="760" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="430" y1="760" x2="430" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="430" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="692" y="740" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#e8edf9" text-anchor="end" font-weight="700" style="">Emergency Button  (SW2)</text>
+<text x="692" y="794" font-family="'JetBrains Mono','Fira Code',monospace" font-size="11.5" fill="#7f8cab" text-anchor="end" font-weight="400" style="">Hold 5s = trigger SOS, hold 2s while active = cancel</text>
+<text x="1440" y="168" font-family="'JetBrains Mono','Fira Code',monospace" font-size="14" fill="#a9b6d6" text-anchor="middle" font-weight="700" style="">SENSORS — ENVIRONMENT, LOCATION &amp; AUDIO</text>
+<rect x="1230" y="210" width="240" height="130" rx="10" fill="#16213a" stroke="#4f7cff" stroke-width="1.6"/>
+<text x="1350.0" y="236" font-family="'JetBrains Mono','Fira Code',monospace" font-size="16" fill="#e8edf9" text-anchor="middle" font-weight="700" style="">DHT22</text>
+<text x="1350.0" y="255" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#7f8cab" text-anchor="middle" font-weight="400" style="">Temperature &amp; Humidity Sensor</text>
+<circle cx="1230" cy="280" r="3.2" fill="#ff5d73"/>
+<text x="1244" y="284" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ff5d73" text-anchor="start" font-weight="700" style="">VCC</text>
+<circle cx="1230" cy="302" r="3.2" fill="#39c5ff"/>
+<text x="1244" y="306" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#39c5ff" text-anchor="start" font-weight="700" style="">DATA</text>
+<circle cx="1230" cy="324" r="3.2" fill="#8ba3c7"/>
+<text x="1244" y="328" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#8ba3c7" text-anchor="start" font-weight="700" style="">GND</text>
+<line x1="1230" y1="280" x2="1190" y2="280" stroke="#ff5d73" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="1190" y1="280" x2="1190" y2="108" stroke="#ff5d73" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="1190" cy="108" r="4.5" fill="#ff5d73"/>
+<line x1="1230" y1="324" x2="1190" y2="324" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="1190" y1="324" x2="1190" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="1190" cy="908" r="4.5" fill="#8ba3c7"/>
+<polyline points="1140,280.0 1147.0,288.3333333333333 1133.0,296.6666666666667 1147.0,305.0 1133.0,313.3333333333333 1147.0,321.6666666666667 1133.0,330.0 1140,330.0" fill="none" stroke="#e8edf9" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+<line x1="1140" y1="280" x2="1140" y2="280.0" stroke="#ff5d73" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="1140" y1="280" x2="1190" y2="280" stroke="#ff5d73" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="1140" y1="330.0" x2="1140" y2="302" stroke="#39c5ff" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="1140" y1="302" x2="1230" y2="302" stroke="#39c5ff" stroke-width="2.2" stroke-linecap="round"/>
+<text x="1126" y="305" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#a9b6d6" text-anchor="end" font-weight="400" style="">10kΩ</text>
+<text x="1126" y="322" font-family="'JetBrains Mono','Fira Code',monospace" font-size="11" fill="#7f8cab" text-anchor="end" font-weight="400" style="">pull-up</text>
+<line x1="1470" y1="302" x2="1100" y2="260" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1100" y1="260" x2="1020" y2="260" stroke="#39c5ff" stroke-width="2.6" stroke-linecap="round"/>
+<rect x="1230" y="400" width="240" height="140" rx="10" fill="#16213a" stroke="#4f7cff" stroke-width="1.6"/>
+<text x="1350.0" y="426" font-family="'JetBrains Mono','Fira Code',monospace" font-size="16" fill="#e8edf9" text-anchor="middle" font-weight="700" style="">NEO-6M GPS</text>
+<text x="1350.0" y="445" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#7f8cab" text-anchor="middle" font-weight="400" style="">UART → HardwareSerial2 @ 9600 baud</text>
+<circle cx="1230" cy="468" r="3.2" fill="#ff5d73"/>
+<text x="1244" y="472" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ff5d73" text-anchor="start" font-weight="700" style="">VCC</text>
+<circle cx="1230" cy="490" r="3.2" fill="#ffd166"/>
+<text x="1244" y="494" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ffd166" text-anchor="start" font-weight="700" style="">TX</text>
+<circle cx="1230" cy="512" r="3.2" fill="#ffd166"/>
+<text x="1244" y="516" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ffd166" text-anchor="start" font-weight="700" style="">RX</text>
+<circle cx="1230" cy="532" r="3.2" fill="#8ba3c7"/>
+<text x="1244" y="536" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#8ba3c7" text-anchor="start" font-weight="700" style="">GND</text>
+<line x1="1230" y1="468" x2="1174" y2="468" stroke="#ff5d73" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="1174" y1="468" x2="1174" y2="108" stroke="#ff5d73" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="1174" cy="108" r="4.5" fill="#ff5d73"/>
+<line x1="1230" y1="532" x2="1174" y2="532" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="1174" y1="532" x2="1174" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="1174" cy="908" r="4.5" fill="#8ba3c7"/>
+<line x1="1470" y1="490" x2="1140" y2="360" stroke="#ffd166" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1140" y1="360" x2="1020" y2="360" stroke="#ffd166" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1020" y1="460" x2="1170" y2="460" stroke="#ffd166" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1170" y1="460" x2="1470" y2="512" stroke="#ffd166" stroke-width="2.6" stroke-linecap="round"/>
+<rect x="1230" y="580" width="240" height="210" rx="10" fill="#16213a" stroke="#4f7cff" stroke-width="1.6"/>
+<text x="1350.0" y="606" font-family="'JetBrains Mono','Fira Code',monospace" font-size="16" fill="#e8edf9" text-anchor="middle" font-weight="700" style="">INMP441</text>
+<text x="1350.0" y="625" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#7f8cab" text-anchor="middle" font-weight="400" style="">I2S MEMS Microphone</text>
+<circle cx="1230" cy="646" r="3.2" fill="#ff5d73"/>
+<text x="1244" y="650" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#ff5d73" text-anchor="start" font-weight="700" style="">VDD</text>
+<circle cx="1230" cy="670" r="3.2" fill="#c792ea"/>
+<text x="1244" y="674" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#c792ea" text-anchor="start" font-weight="700" style="">WS</text>
+<circle cx="1230" cy="694" r="3.2" fill="#c792ea"/>
+<text x="1244" y="698" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#c792ea" text-anchor="start" font-weight="700" style="">SCK</text>
+<circle cx="1230" cy="718" r="3.2" fill="#c792ea"/>
+<text x="1244" y="722" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#c792ea" text-anchor="start" font-weight="700" style="">SD</text>
+<circle cx="1230" cy="742" r="3.2" fill="#8ba3c7"/>
+<text x="1244" y="746" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#8ba3c7" text-anchor="start" font-weight="700" style="">L/R</text>
+<circle cx="1230" cy="764" r="3.2" fill="#8ba3c7"/>
+<text x="1244" y="768" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12" fill="#8ba3c7" text-anchor="start" font-weight="700" style="">GND</text>
+<line x1="1230" y1="646" x2="1160" y2="646" stroke="#ff5d73" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="1160" y1="646" x2="1160" y2="108" stroke="#ff5d73" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="1160" cy="108" r="4.5" fill="#ff5d73"/>
+<line x1="1230" y1="764" x2="1160" y2="764" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<line x1="1160" y1="764" x2="1160" y2="908" stroke="#8ba3c7" stroke-width="2.4" stroke-linecap="round"/>
+<circle cx="1160" cy="908" r="4.5" fill="#8ba3c7"/>
+<line x1="1230" y1="742" x2="1190" y2="742" stroke="#8ba3c7" stroke-width="2.2" stroke-linecap="round"/>
+<line x1="1190" y1="742" x2="1190" y2="908" stroke="#8ba3c7" stroke-width="2.2" stroke-linecap="round"/>
+<circle cx="1190" cy="908" r="4.5" fill="#8ba3c7"/>
+<text x="1184" y="734" font-family="'JetBrains Mono','Fira Code',monospace" font-size="10.5" fill="#7f8cab" text-anchor="end" font-weight="400" style="">channel select</text>
+<line x1="1470" y1="670" x2="1130" y2="560" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1130" y1="560" x2="1020" y2="560" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1470" y1="694" x2="1160" y2="660" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1160" y1="660" x2="1020" y2="660" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1470" y1="718" x2="1190" y2="760" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<line x1="1190" y1="760" x2="1020" y2="760" stroke="#c792ea" stroke-width="2.6" stroke-linecap="round"/>
+<rect x="60" y="940" width="1680" height="150" rx="12" fill="#111a2e" stroke="#2a3a5c" stroke-width="1.4"/>
+<text x="84" y="970" font-family="'JetBrains Mono','Fira Code',monospace" font-size="15" fill="#e8edf9" text-anchor="start" font-weight="700" style="">LEGEND</text>
+<line x1="84" y1="995" x2="118" y2="995" stroke="#ff5d73" stroke-width="4" stroke-linecap="round"/>
+<text x="128" y="1000" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="start" font-weight="400" style="">3.3V Power</text>
+<line x1="84" y1="1021" x2="118" y2="1021" stroke="#ff9f43" stroke-width="4" stroke-linecap="round"/>
+<text x="128" y="1026" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="start" font-weight="400" style="">VIN / 5V (unused rail, brought out for reference)</text>
+<line x1="84" y1="1047" x2="118" y2="1047" stroke="#8ba3c7" stroke-width="4" stroke-linecap="round"/>
+<text x="128" y="1052" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="start" font-weight="400" style="">Ground (GND)</text>
+<line x1="604" y1="995" x2="638" y2="995" stroke="#39c5ff" stroke-width="4" stroke-linecap="round"/>
+<text x="648" y="1000" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="start" font-weight="400" style="">Digital GPIO (LED / Button)</text>
+<line x1="604" y1="1021" x2="638" y2="1021" stroke="#ffd166" stroke-width="4" stroke-linecap="round"/>
+<text x="648" y="1026" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="start" font-weight="400" style="">UART Serial (GPS NEO-6M)</text>
+<line x1="604" y1="1047" x2="638" y2="1047" stroke="#c792ea" stroke-width="4" stroke-linecap="round"/>
+<text x="648" y="1052" font-family="'JetBrains Mono','Fira Code',monospace" font-size="13" fill="#a9b6d6" text-anchor="start" font-weight="400" style="">I2S Bus (INMP441 Mic)</text>
+<text x="1020" y="970" font-family="'JetBrains Mono','Fira Code',monospace" font-size="15" fill="#e8edf9" text-anchor="start" font-weight="700" style="">DEVICE ID</text>
+<text x="1020" y="995" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12.5" fill="#7f8cab" text-anchor="start" font-weight="400" style="">synchora84205@!&amp;100@!%device</text>
+<text x="1020" y="1020" font-family="'JetBrains Mono','Fira Code',monospace" font-size="15" fill="#e8edf9" text-anchor="start" font-weight="700" style="">WI-FI</text>
+<text x="1020" y="1044" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12.5" fill="#7f8cab" text-anchor="start" font-weight="400" style="">SSID: Realme11x   (WPA2, credentials in wifiConfig.h)</text>
+<text x="1420" y="970" font-family="'JetBrains Mono','Fira Code',monospace" font-size="15" fill="#e8edf9" text-anchor="start" font-weight="700" style="">SERVER LINK</text>
+<text x="1420" y="995" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12.5" fill="#7f8cab" text-anchor="start" font-weight="400" style="">WebSocket → ws://...ngrok-free.app</text>
+<text x="1420" y="1020" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12.5" fill="#7f8cab" text-anchor="start" font-weight="400" style="">Sends TOKEN on connect, telemetry every 60s</text>
+<text x="1420" y="1044" font-family="'JetBrains Mono','Fira Code',monospace" font-size="12.5" fill="#7f8cab" text-anchor="start" font-weight="400" style="">Reconnect: WiFi 5s check / WS auto 3s retry</text>
+</svg>
+  </div>
+
+  <section class="tables">
+    <h2>GPIO Pin Map</h2>
+    <div class="grid-two">
+      <table>
+        <thead><tr><th>Pin</th><th>Function</th><th>Bus</th></tr></thead>
+        <tbody>
+          <tr><td class="pin">GPIO2</td><td>WiFi status LED (blinks while connecting/reconnecting)</td><td><span class="tag gpio">GPIO</span></td></tr>
+          <tr><td class="pin">GPIO4</td><td>Recording LED (on while audio capture is active)</td><td><span class="tag gpio">GPIO</span></td></tr>
+          <tr><td class="pin">GPIO14</td><td>Socket-connected LED (solid when WebSocket is linked, blinks when down)</td><td><span class="tag gpio">GPIO</span></td></tr>
+          <tr><td class="pin">GPIO22</td><td>Emergency LED (fast-blinks while SOS is armed/triggered)</td><td><span class="tag gpio">GPIO</span></td></tr>
+          <tr><td class="pin">GPIO13</td><td>Recording button (INPUT_PULLUP, pressed = LOW)</td><td><span class="tag gpio">GPIO</span></td></tr>
+          <tr><td class="pin">GPIO23</td><td>Emergency button &mdash; hold 5s to trigger, hold 2s to cancel</td><td><span class="tag gpio">GPIO</span></td></tr>
+        </tbody>
+      </table>
+      <table>
+        <thead><tr><th>Pin</th><th>Function</th><th>Bus</th></tr></thead>
+        <tbody>
+          <tr><td class="pin">GPIO5</td><td>DHT22 single-wire DATA line (10k&Omega; pull-up to 3V3)</td><td><span class="tag gpio">GPIO</span></td></tr>
+          <tr><td class="pin">GPIO16</td><td>UART2 RX &mdash; wired to GPS module TX</td><td><span class="tag uart">UART</span></td></tr>
+          <tr><td class="pin">GPIO17</td><td>UART2 TX &mdash; wired to GPS module RX</td><td><span class="tag uart">UART</span></td></tr>
+          <tr><td class="pin">GPIO15</td><td>I2S Word Select (WS / LRCLK) &mdash; INMP441 mic</td><td><span class="tag i2s">I2S</span></td></tr>
+          <tr><td class="pin">GPIO26</td><td>I2S Bit Clock (SCK) &mdash; INMP441 mic</td><td><span class="tag i2s">I2S</span></td></tr>
+          <tr><td class="pin">GPIO32</td><td>I2S Serial Data (SD) &mdash; INMP441 mic, right-channel only</td><td><span class="tag i2s">I2S</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Peripheral Power &amp; Ground</h2>
+    <table>
+      <thead><tr><th>Component</th><th>VCC / VDD</th><th>GND</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>4&times; status LEDs</td><td>&mdash; (driven directly by GPIO)</td><td>Via 220&Omega; series resistor &rarr; GND bus</td><td>Standard current-limiting resistor per LED</td></tr>
+        <tr><td>2&times; push buttons</td><td>&mdash;</td><td>Other leg &rarr; GND bus</td><td>Internal <code>INPUT_PULLUP</code> used, no external resistor needed</td></tr>
+        <tr><td>DHT22</td><td><span class="tag pwr">3V3</span></td><td>GND bus</td><td>10k&Omega; pull-up resistor from 3V3 to DATA line</td></tr>
+        <tr><td>NEO-6M GPS</td><td><span class="tag pwr">3V3</span></td><td>GND bus</td><td>UART cross-connect: module TX&rarr;ESP32 RX, module RX&larr;ESP32 TX</td></tr>
+        <tr><td>INMP441 mic</td><td><span class="tag pwr">3V3</span></td><td>GND bus (incl. L/R pin)</td><td>L/R tied to GND to select the read channel</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    Diagram reflects the pin assignments in <code>config/pins.h</code> and the peripheral wiring implied by <code>drivers/</code> and <code>services/</code> source
+    (DHT22, TinyGPS++/HardwareSerial2, I2S driver for INMP441). Resistor values (220&Omega; LED, 10k&Omega; DHT22 pull-up) are typical recommended values &mdash;
+    verify against your actual components before building.
+  </footer>
+
+</div>
+</body>
+</html>
