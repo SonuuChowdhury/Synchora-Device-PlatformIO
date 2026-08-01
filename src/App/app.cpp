@@ -65,6 +65,7 @@ static EmergencyState emergencyState     = EmergencyState::IDLE;
 static unsigned long  emergencyHoldStart = 0;
 static unsigned long  cancelHoldStart    = 0;
 static unsigned long  lastEmergencyBlink = 0;
+static unsigned long  lastEmergencyMelody = 0;
 static bool           emergencyLedState  = false;
 
 static const unsigned long EMERGENCY_HOLD_MS  = 5000;
@@ -137,10 +138,13 @@ void onWebSocketConnected(const char* message) {
     playIntroPending = true;
 }
 
+static bool isResponding = false;
+
 void onWebSocketDisconnected(const char* message) {
     Serial.println("[App] ❌ WebSocket disconnected");
 
     isRecording = false;
+    isResponding = false;
     recordingLed.off();
 
     if (emergencyState == EmergencyState::HOLDING) {
@@ -154,11 +158,19 @@ void onWebSocketDisconnected(const char* message) {
 
 void onWebSocketMessage(const char* message) {
     Serial.printf("[App] 📨 Message: %s\n", message);
-    if (strstr(message, "\"TTS_START\"")) {
-        Serial.println("[App] 🔊 Incoming AI Speech Response — status LED ON");
+    if (strstr(message, "\"EMERGENCY_START\"") || strstr(message, "emergency_help")) {
+        Serial.println("[App] 🚨 Voice Emergency SOS Activated — starting LED alarm & loop");
+        speaker.stop();
+        emergencyState     = EmergencyState::TRIGGERED;
+        emergencyLedState  = false;
+        lastEmergencyBlink = millis();
+    } else if (strstr(message, "\"TTS_START\"")) {
+        Serial.println("[App] 🔊 Incoming AI Speech Response — status LED SOLID ON");
+        isResponding = true;
         recordingLed.on();
     } else if (strstr(message, "\"TTS_END\"")) {
         Serial.println("[App] ✅ AI Speech Response Stream Complete — status LED OFF");
+        isResponding = false;
         recordingLed.off();
     }
 }
@@ -184,6 +196,7 @@ void App::init() {
 
     Serial.println("[App] 🔊 Starting Speaker (MAX98357A)...");
     speaker.init();
+    speaker.startTask();
 
     Serial.println("[App] 🌡️  Starting DHT22...");
     dht.init();
@@ -254,13 +267,13 @@ void handleIntroPlayback() {
 static unsigned long lastNotReadyBeep = 0;
 
 void handleNotReadyBeep() {
-    // Silence status beep during active Emergency SOS
-    if (emergencyState != EmergencyState::IDLE) return;
+    // Silence status beep during active Emergency SOS or while AI is responding/recording
+    if (emergencyState != EmergencyState::IDLE || isRecording || isResponding) return;
 
     bool isReady = wifi.isConnected() && webSocket.isConnected();
     if (!isReady) {
         unsigned long now = millis();
-        if (now - lastNotReadyBeep >= 2000) {
+        if (now - lastNotReadyBeep >= 3000) {
             lastNotReadyBeep = now;
             speaker.playNotReadyBeep();
         }
@@ -268,10 +281,31 @@ void handleNotReadyBeep() {
 }
 
 // ============================================================================
-// RECORDING — socket-gated
+// RECORDING — socket-gated & VAD filtered with Emergency Lockout
 // ============================================================================
 
+static float computeRMS(const uint8_t* buffer, size_t bytes) {
+    size_t samples = bytes / sizeof(int16_t);
+    if (samples == 0) return 0.0f;
+    const int16_t* pcm = (const int16_t*)buffer;
+    float sum = 0.0f;
+    for (size_t i = 0; i < samples; i++) {
+        float sample = (float)pcm[i];
+        sum += sample * sample;
+    }
+    return sqrtf(sum / (float)samples);
+}
+
 void handleButtonAndRecording() {
+    // Voice recording locked out during active Emergency SOS alarm until user resets via 2s hold
+    if (emergencyState != EmergencyState::IDLE) {
+        if (isRecording) {
+            isRecording = false;
+            recordingLed.off();
+        }
+        return;
+    }
+
     bool socketReady = webSocket.isConnected();
 
     if (button.isPressed()) {
@@ -285,6 +319,14 @@ void handleButtonAndRecording() {
             return;
         }
 
+        // Barge-In Interrupt: Stop any active speech immediately if button is pressed
+        if (isResponding || speaker.isBusy()) {
+            Serial.println("[App] 🛑 Button pressed mid-speech — BARGE-IN INTERRUPT! Stopping speaker.");
+            speaker.stop();
+            isResponding = false;
+            webSocket.sendMessage("{\"event\":\"CANCEL_SPEECH\"}");
+        }
+
         if (!isRecording) {
             Serial.println("[App] 🎙️ Recording started");
             isRecording = true;
@@ -295,15 +337,22 @@ void handleButtonAndRecording() {
         uint8_t buffer[1024];
         int bytes = mic.read(buffer, 512);
         if (bytes > 0) {
-            webSocket.sendBinary(buffer, bytes);
+            float rms = computeRMS(buffer, bytes);
+            // Send binary packet if audio level exceeds VAD silence floor (250 RMS)
+            if (rms >= 250.0f) {
+                webSocket.sendBinary(buffer, bytes);
+            }
         }
 
     } else {
         if (isRecording) {
-            Serial.println("[App] ⏹️ Recording stopped");
+            Serial.println("[App] ⏹️ Recording stopped — waiting for AI response");
             isRecording = false;
-            recordingLed.off();
+            isResponding = true;
+            recordingLed.on(); // Keep solid ON while processing & receiving response
             if (socketReady) webSocket.sendEvent("END");
+        } else if (!isResponding) {
+            recordingLed.off();
         }
     }
 }
@@ -311,8 +360,6 @@ void handleButtonAndRecording() {
 // ============================================================================
 // EMERGENCY BUTTON STATE MACHINE
 // ============================================================================
-
-static unsigned long lastEmergencyMelody = 0;
 
 void handleEmergencyButton() {
     bool btnHeld = emergencyButton.isPressed();
@@ -347,11 +394,10 @@ void handleEmergencyButton() {
                 }
                 Serial.println("[Emergency] 🚨 TRIGGERED — sending EMERGENCY_TRIGGER");
                 webSocket.sendMessage("{\"event\":\"EMERGENCY_TRIGGER\"}");
-                speaker.playSiren();
+                speaker.stop();
                 emergencyState     = EmergencyState::TRIGGERED;
                 emergencyLedState  = false;
                 lastEmergencyBlink = now;
-                lastEmergencyMelody = 0; // Play melody immediately
             }
             break;
 
@@ -361,12 +407,6 @@ void handleEmergencyButton() {
                 lastEmergencyBlink = now;
                 emergencyLedState  = !emergencyLedState;
                 emergencyLedState ? emergencyLed.on() : emergencyLed.off();
-            }
-
-            // Play emergency alarm sound every 1.0 s while active
-            if (now - lastEmergencyMelody >= 1000) {
-                lastEmergencyMelody = now;
-                speaker.playEmergencyAlarm();
             }
 
             if (btnHeld) {
@@ -390,16 +430,13 @@ void handleEmergencyButton() {
                 emergencyLedState ? emergencyLed.on() : emergencyLed.off();
             }
 
-            // Keep playing emergency alarm while holding to cancel
-            if (now - lastEmergencyMelody >= 1000) {
-                lastEmergencyMelody = now;
-                speaker.playEmergencyAlarm();
-            }
-
             if (now - cancelHoldStart >= CANCEL_HOLD_MS) {
                 emergencyState = EmergencyState::IDLE;
                 emergencyLed.off();
                 speaker.stop();
+                if (webSocket.isConnected()) {
+                    webSocket.sendMessage("{\"event\":\"EMERGENCY_CANCEL\"}");
+                }
                 Serial.println("[Emergency] ✅ Cancelled — returning to normal.");
             }
             break;

@@ -93,7 +93,7 @@ void WebSocketService::init() {
 
     webSocket.setExtraHeaders("ngrok-skip-browser-warning: true\r\nUser-Agent: ESP32/1.0\r\n");
     webSocket.onEvent(webSocketEventHandler);
-    webSocket.setReconnectInterval(3000);
+    webSocket.setReconnectInterval(1000);
 }
 
 // ============================================================================

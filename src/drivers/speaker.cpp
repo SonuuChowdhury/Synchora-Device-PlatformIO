@@ -8,6 +8,42 @@
 #define DMA_BUF_COUNT      16
 #define DMA_BUF_LEN        1024
 
+#define RING_BUF_SIZE      16384
+
+static uint8_t ringBuf[RING_BUF_SIZE];
+static volatile size_t ringHead = 0;
+static volatile size_t ringTail = 0;
+static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t speakerTaskHandle = NULL;
+
+static void speakerTask(void* param) {
+    uint8_t chunkBuf[512];
+    for (;;) {
+        size_t toRead = 0;
+
+        portENTER_CRITICAL(&ringMux);
+        size_t available = (ringHead >= ringTail) 
+            ? (ringHead - ringTail) 
+            : (RING_BUF_SIZE - ringTail + ringHead);
+
+        if (available > 0) {
+            toRead = available > sizeof(chunkBuf) ? sizeof(chunkBuf) : available;
+            for (size_t i = 0; i < toRead; i++) {
+                chunkBuf[i] = ringBuf[ringTail];
+                ringTail = (ringTail + 1) % RING_BUF_SIZE;
+            }
+        }
+        portEXIT_CRITICAL(&ringMux);
+
+        if (toRead > 0) {
+            size_t bytesWritten = 0;
+            i2s_write(SPEAKER_I2S_PORT, chunkBuf, toRead, &bytesWritten, pdMS_TO_TICKS(50));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+}
+
 void Speaker::init() {
     i2s_config_t config = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
@@ -34,48 +70,81 @@ void Speaker::init() {
 
     err = i2s_driver_install(SPEAKER_I2S_PORT, &config, 0, NULL);
     if (err != ESP_OK) {
-        Serial.printf("[Speaker] ❌ i2s_driver_install failed: %d\n", err);
+        Serial.printf("[Speaker] i2s_driver_install failed: %d\n", err);
         return;
     }
 
     err = i2s_set_pin(SPEAKER_I2S_PORT, &pins);
     if (err != ESP_OK) {
-        Serial.printf("[Speaker] ❌ i2s_set_pin failed: %d\n", err);
+        Serial.printf("[Speaker] i2s_set_pin failed: %d\n", err);
         return;
     }
 
     err = i2s_set_clk(SPEAKER_I2S_PORT, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
     if (err != ESP_OK) {
-        Serial.printf("[Speaker] ❌ i2s_set_clk failed: %d\n", err);
+        Serial.printf("[Speaker] i2s_set_clk failed: %d\n", err);
         return;
     }
 
     i2s_zero_dma_buffer(SPEAKER_I2S_PORT);
 
-    Serial.println("[Speaker] ✅ MAX98357A I2S Amplifier initialized (LRC:25, BCLK:27, DIN:33)");
+    Serial.println("[Speaker] MAX98357A I2S Amplifier initialized");
+}
+
+void Speaker::startTask() {
+    if (speakerTaskHandle == NULL) {
+        xTaskCreatePinnedToCore(
+            speakerTask,
+            "SpeakerTask",
+            4096,
+            NULL,
+            2,
+            &speakerTaskHandle,
+            0 // Pin to Core 0 so main app loop runs freely on Core 1
+        );
+        Serial.println("[Speaker] FreeRTOS speaker task started on Core 0");
+    }
 }
 
 void Speaker::write(const uint8_t* buffer, size_t size) {
-    size_t bytesWritten = 0;
-    i2s_write(SPEAKER_I2S_PORT, buffer, size, &bytesWritten, pdMS_TO_TICKS(100));
+    if (speakerTaskHandle == NULL) {
+        size_t bytesWritten = 0;
+        i2s_write(SPEAKER_I2S_PORT, buffer, size, &bytesWritten, pdMS_TO_TICKS(100));
+        return;
+    }
+
+    for (size_t i = 0; i < size; i++) {
+        portENTER_CRITICAL(&ringMux);
+        size_t nextHead = (ringHead + 1) % RING_BUF_SIZE;
+        if (nextHead != ringTail) {
+            ringBuf[ringHead] = buffer[i];
+            ringHead = nextHead;
+        } else {
+            // Buffer full, drop oldest byte
+            ringTail = (ringTail + 1) % RING_BUF_SIZE;
+            ringBuf[ringHead] = buffer[i];
+            ringHead = nextHead;
+        }
+        portEXIT_CRITICAL(&ringMux);
+    }
 }
 
-// ============================================================================
-// TONE GENERATION
-// Note for 16Ω 0.25W Speakers: Recommended frequency range is 500 Hz to 2000 Hz.
-// Below 300 Hz is physically inaudible; above 3500 Hz sounds harsh/tinny.
-// ============================================================================
+bool Speaker::isBusy() {
+    portENTER_CRITICAL(&ringMux);
+    bool busy = (ringHead != ringTail);
+    portEXIT_CRITICAL(&ringMux);
+    return busy;
+}
 
 void Speaker::playTone(uint32_t frequencyHz, uint32_t durationMs) {
     size_t numFrames = (SAMPLE_RATE * durationMs) / 1000;
     if (numFrames == 0) return;
 
-    // Stereo buffer: 2 int16_t samples per frame (Left and Right)
     int16_t* buffer = (int16_t*)malloc(numFrames * 2 * sizeof(int16_t));
     if (!buffer) return;
 
-    float amplitude = 18000.0f; // Clean peak amplitude without clipping micro-speakers
-    size_t fadeSamples = (SAMPLE_RATE * 8) / 1000; // 8 ms smooth fade-in and fade-out
+    float amplitude = 18000.0f;
+    size_t fadeSamples = (SAMPLE_RATE * 8) / 1000;
     if (fadeSamples > numFrames / 2) {
         fadeSamples = numFrames / 2;
     }
@@ -94,8 +163,8 @@ void Speaker::playTone(uint32_t frequencyHz, uint32_t durationMs) {
         float t = (float)i / (float)SAMPLE_RATE;
         int16_t sampleVal = (int16_t)(amplitude * env * sinf(2.0f * M_PI * (float)frequencyHz * t));
 
-        buffer[2 * i]     = sampleVal; // Left channel
-        buffer[2 * i + 1] = sampleVal; // Right channel
+        buffer[2 * i]     = sampleVal;
+        buffer[2 * i + 1] = sampleVal;
     }
 
     write((const uint8_t*)buffer, numFrames * 2 * sizeof(int16_t));
@@ -103,56 +172,45 @@ void Speaker::playTone(uint32_t frequencyHz, uint32_t durationMs) {
 }
 
 void Speaker::playChime() {
-    Serial.println("[Speaker] 🔔 Playing startup/connection chime...");
-    playTone(523, 100); // C5
-    delay(15);
-    playTone(659, 100); // E5
-    delay(15);
-    playTone(784, 180); // G5
+    Serial.println("[Speaker] Playing startup/connection chime...");
+    playTone(523, 100);
+    playTone(659, 100);
+    playTone(784, 180);
 }
 
 void Speaker::playSiren() {
-    Serial.println("[Speaker] 🚨 Playing emergency siren tone...");
+    Serial.println("[Speaker] Playing emergency siren tone...");
     for (int i = 0; i < 3; i++) {
         playTone(880, 100);
-        delay(10);
         playTone(600, 100);
-        delay(10);
     }
 }
 
 void Speaker::playEmergencyMelody() {
-    playTone(523,  120); // C5
-    delay(10);
-    playTone(659,  120); // E5
-    delay(10);
-    playTone(784,  120); // G5
-    delay(10);
-    playTone(1047, 260); // C6
-    delay(10);
-    playTone(784,  120); // G5
-    delay(10);
-    playTone(659,  120); // E5
+    playTone(523,  120);
+    playTone(659,  120);
+    playTone(784,  120);
+    playTone(1047, 260);
+    playTone(784,  120);
+    playTone(659,  120);
 }
 
 void Speaker::playEmergencyAlarm() {
-    // Balanced 900 Hz / 700 Hz alternating emergency alarm warble
     playTone(900, 90);
-    delay(10);
     playTone(700, 90);
-    delay(10);
     playTone(900, 90);
-    delay(10);
     playTone(700, 90);
 }
 
 void Speaker::playNotReadyBeep() {
-    // Modern dual-note rising status chirp (C5 523 Hz -> G5 784 Hz) with smooth envelope
     playTone(523, 40);
-    delay(10);
     playTone(784, 50);
 }
 
 void Speaker::stop() {
+    portENTER_CRITICAL(&ringMux);
+    ringHead = 0;
+    ringTail = 0;
+    portEXIT_CRITICAL(&ringMux);
     i2s_zero_dma_buffer(SPEAKER_I2S_PORT);
 }
