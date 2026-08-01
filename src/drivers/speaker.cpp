@@ -14,7 +14,7 @@ void Speaker::init() {
         .sample_rate          = SAMPLE_RATE,
         .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
         .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
-        .communication_format = I2S_COMM_FORMAT_I2S,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count        = DMA_BUF_COUNT,
         .dma_buf_len          = DMA_BUF_LEN,
@@ -67,56 +67,90 @@ void Speaker::write(const uint8_t* buffer, size_t size) {
 // ============================================================================
 
 void Speaker::playTone(uint32_t frequencyHz, uint32_t durationMs) {
-    size_t samplesCount = (SAMPLE_RATE * durationMs) / 1000;
-    int16_t* buffer = (int16_t*)malloc(samplesCount * sizeof(int16_t));
+    size_t numFrames = (SAMPLE_RATE * durationMs) / 1000;
+    if (numFrames == 0) return;
+
+    // Stereo buffer: 2 int16_t samples per frame (Left and Right)
+    int16_t* buffer = (int16_t*)malloc(numFrames * 2 * sizeof(int16_t));
     if (!buffer) return;
 
-    float amplitude = 30000.0f; // Maximum 16-bit peak volume amplitude
-    for (size_t i = 0; i < samplesCount; i++) {
-        float t = (float)i / (float)SAMPLE_RATE;
-        buffer[i] = (int16_t)(amplitude * sinf(2.0f * M_PI * (float)frequencyHz * t));
+    float amplitude = 18000.0f; // Clean peak amplitude without clipping micro-speakers
+    size_t fadeSamples = (SAMPLE_RATE * 8) / 1000; // 8 ms smooth fade-in and fade-out
+    if (fadeSamples > numFrames / 2) {
+        fadeSamples = numFrames / 2;
     }
 
-    write((const uint8_t*)buffer, samplesCount * sizeof(int16_t));
+    for (size_t i = 0; i < numFrames; i++) {
+        float env = 1.0f;
+        if (fadeSamples > 0) {
+            if (i < fadeSamples) {
+                env = 0.5f * (1.0f - cosf(M_PI * (float)i / (float)fadeSamples));
+            } else if (i >= numFrames - fadeSamples) {
+                size_t endIdx = numFrames - 1 - i;
+                env = 0.5f * (1.0f - cosf(M_PI * (float)endIdx / (float)fadeSamples));
+            }
+        }
+
+        float t = (float)i / (float)SAMPLE_RATE;
+        int16_t sampleVal = (int16_t)(amplitude * env * sinf(2.0f * M_PI * (float)frequencyHz * t));
+
+        buffer[2 * i]     = sampleVal; // Left channel
+        buffer[2 * i + 1] = sampleVal; // Right channel
+    }
+
+    write((const uint8_t*)buffer, numFrames * 2 * sizeof(int16_t));
     free(buffer);
 }
 
 void Speaker::playChime() {
-    Serial.println("[Speaker] 🔔 Playing startup chime...");
-    playTone(523, 120); // C5
-    playTone(659, 120); // E5
-    playTone(784, 200); // G5
+    Serial.println("[Speaker] 🔔 Playing startup/connection chime...");
+    playTone(523, 100); // C5
+    delay(15);
+    playTone(659, 100); // E5
+    delay(15);
+    playTone(784, 180); // G5
 }
 
 void Speaker::playSiren() {
     Serial.println("[Speaker] 🚨 Playing emergency siren tone...");
     for (int i = 0; i < 3; i++) {
         playTone(880, 100);
+        delay(10);
         playTone(600, 100);
+        delay(10);
     }
 }
 
 void Speaker::playEmergencyMelody() {
     playTone(523,  120); // C5
+    delay(10);
     playTone(659,  120); // E5
+    delay(10);
     playTone(784,  120); // G5
+    delay(10);
     playTone(1047, 260); // C6
+    delay(10);
     playTone(784,  120); // G5
+    delay(10);
     playTone(659,  120); // E5
 }
 
 void Speaker::playEmergencyAlarm() {
     // Balanced 900 Hz / 700 Hz alternating emergency alarm warble
     playTone(900, 90);
+    delay(10);
     playTone(700, 90);
+    delay(10);
     playTone(900, 90);
+    delay(10);
     playTone(700, 90);
 }
 
 void Speaker::playNotReadyBeep() {
-    // Modern dual-note rising status chirp (C5 523 Hz -> G5 784 Hz)
-    playTone(523, 35);
-    playTone(784, 45);
+    // Modern dual-note rising status chirp (C5 523 Hz -> G5 784 Hz) with smooth envelope
+    playTone(523, 40);
+    delay(10);
+    playTone(784, 50);
 }
 
 void Speaker::stop() {

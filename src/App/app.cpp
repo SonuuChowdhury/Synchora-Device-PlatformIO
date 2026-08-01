@@ -129,6 +129,9 @@ void onWebSocketConnected(const char* message) {
     // Schedule immediate telemetry push after connect
     sendTelemetryOnConnect = true;
 
+    // Play connection success chime
+    speaker.playChime();
+
     // Schedule introduction playback 1 second after connect
     playIntroTimer   = millis();
     playIntroPending = true;
@@ -151,6 +154,13 @@ void onWebSocketDisconnected(const char* message) {
 
 void onWebSocketMessage(const char* message) {
     Serial.printf("[App] 📨 Message: %s\n", message);
+    if (strstr(message, "\"TTS_START\"")) {
+        Serial.println("[App] 🔊 Incoming AI Speech Response — status LED ON");
+        recordingLed.on();
+    } else if (strstr(message, "\"TTS_END\"")) {
+        Serial.println("[App] ✅ AI Speech Response Stream Complete — status LED OFF");
+        recordingLed.off();
+    }
 }
 
 void onWebSocketBinary(const uint8_t* payload, size_t length) {
