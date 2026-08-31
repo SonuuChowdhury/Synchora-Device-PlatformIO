@@ -1,5 +1,5 @@
 #pragma once
 
-#define WEBSOCKET_URL  "ws://5320-2401-4900-1c00-c6-6597-bc29-c6e5-d4d4.ngrok-free.app"
+#define WEBSOCKET_URL  "ws://e747-2401-4900-1c01-95a0-503a-673-513d-14d0.ngrok-free.app"
 #define WEBSOCKET_PORT 80
 #define WEBSOCKET_PATH "/"

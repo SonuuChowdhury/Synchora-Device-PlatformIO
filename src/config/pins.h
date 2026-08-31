@@ -17,3 +17,4 @@
 #define SPEAKER_LRC_PIN  25
 #define SPEAKER_BCLK_PIN 27
 #define SPEAKER_DIN_PIN  33
+#define SPEAKER_SD_PIN   18

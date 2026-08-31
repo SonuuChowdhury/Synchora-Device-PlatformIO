@@ -165,11 +165,14 @@ void onWebSocketMessage(const char* message) {
         emergencyLedState  = false;
         lastEmergencyBlink = millis();
     } else if (strstr(message, "\"TTS_START\"")) {
-        Serial.println("[App] 🔊 Incoming AI Speech Response — status LED SOLID ON");
+        Serial.println("[App] 🔊 Incoming AI Speech Response — status LED SOLID ON & Jitter Buffer reset");
+        speaker.stop();
+        speaker.resetJitterBuffer();
         isResponding = true;
         recordingLed.on();
     } else if (strstr(message, "\"TTS_END\"")) {
         Serial.println("[App] ✅ AI Speech Response Stream Complete — status LED OFF");
+        speaker.setPlaybackActive(false);
         isResponding = false;
         recordingLed.off();
     }
@@ -253,9 +256,9 @@ void App::run() {
 // ============================================================================
 
 void handleIntroPlayback() {
-    if (playIntroPending && (millis() - playIntroTimer >= 1000)) {
+    if (playIntroPending) {
         playIntroPending = false;
-        Serial.println("[App] 🔊 1.0s after connection — requesting PLAY_INTRO from server...");
+        Serial.println("[App] 🔊 WebSocket connected — requesting PLAY_INTRO from server immediately...");
         webSocket.sendMessage("{\"event\":\"PLAY_INTRO\"}");
     }
 }
@@ -364,6 +367,11 @@ void handleButtonAndRecording() {
 void handleEmergencyButton() {
     bool btnHeld = emergencyButton.isPressed();
     unsigned long now = millis();
+    static unsigned long lastReleaseTime = 0;
+
+    if (btnHeld) {
+        lastReleaseTime = now;
+    }
 
     switch (emergencyState) {
 
@@ -371,6 +379,7 @@ void handleEmergencyButton() {
             if (btnHeld) {
                 emergencyState     = EmergencyState::HOLDING;
                 emergencyHoldStart = now;
+                lastReleaseTime    = now;
                 emergencyLed.on();
                 Serial.println("[Emergency] 🟡 Button held — counting to 5 s...");
             } else {
@@ -379,7 +388,8 @@ void handleEmergencyButton() {
             break;
 
         case EmergencyState::HOLDING:
-            if (!btnHeld) {
+            // Filter mechanical contact bounce: require continuous release >150ms before aborting
+            if (!btnHeld && (now - lastReleaseTime >= 150)) {
                 emergencyState = EmergencyState::IDLE;
                 emergencyLed.off();
                 Serial.println("[Emergency] ⬜ Released early — aborted.");
@@ -412,12 +422,14 @@ void handleEmergencyButton() {
             if (btnHeld) {
                 emergencyState  = EmergencyState::CANCELLING;
                 cancelHoldStart = now;
+                lastReleaseTime = now;
                 Serial.println("[Emergency] 🔵 Cancel hold — counting to 2 s...");
             }
             break;
 
         case EmergencyState::CANCELLING:
-            if (!btnHeld) {
+            // Filter mechanical contact bounce: require continuous release >150ms before aborting
+            if (!btnHeld && (now - lastReleaseTime >= 150)) {
                 emergencyState     = EmergencyState::TRIGGERED;
                 lastEmergencyBlink = now;
                 Serial.println("[Emergency] 🔄 Released early — resuming blink.");
