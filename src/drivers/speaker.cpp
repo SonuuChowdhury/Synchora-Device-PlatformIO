@@ -8,11 +8,16 @@
 #define DMA_BUF_COUNT      16
 #define DMA_BUF_LEN        1024
 
-#define RING_BUF_SIZE      16384
+// 32 KB ring buffer = ~1 second of 16kHz 16-bit stereo PCM headroom.
+// Doubled from 16KB to absorb slower Groq STT + Gemini chain latency without underflow.
+#define RING_BUF_SIZE        32768
+#define JITTER_BUFFER_TARGET  8192 // 8 KB = ~250ms pre-play cushion
 
 static uint8_t ringBuf[RING_BUF_SIZE];
 static volatile size_t ringHead = 0;
 static volatile size_t ringTail = 0;
+static volatile bool isBuffering = false;
+static volatile bool activePlaybackMode = false;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t speakerTaskHandle = NULL;
 
@@ -26,7 +31,14 @@ static void speakerTask(void* param) {
             ? (ringHead - ringTail) 
             : (RING_BUF_SIZE - ringTail + ringHead);
 
-        if (available > 0) {
+        // Pre-buffering check for jitter suppression on weak Wi-Fi
+        if (isBuffering) {
+            if (available >= JITTER_BUFFER_TARGET || (!activePlaybackMode && available > 0)) {
+                isBuffering = false;
+            }
+        }
+
+        if (!isBuffering && available > 0) {
             toRead = available > sizeof(chunkBuf) ? sizeof(chunkBuf) : available;
             for (size_t i = 0; i < toRead; i++) {
                 chunkBuf[i] = ringBuf[ringTail];
@@ -36,20 +48,31 @@ static void speakerTask(void* param) {
         portEXIT_CRITICAL(&ringMux);
 
         if (toRead > 0) {
+            digitalWrite(SPEAKER_SD_PIN, HIGH); // Wake up MAX98357A amplifier
             size_t bytesWritten = 0;
             i2s_write(SPEAKER_I2S_PORT, chunkBuf, toRead, &bytesWritten, pdMS_TO_TICKS(50));
         } else {
+            // Mute SD pin only when playback is not active
+            if (!activePlaybackMode) {
+                digitalWrite(SPEAKER_SD_PIN, LOW);  // Shutdown / mute amplifier when idle
+            }
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
 
 void Speaker::init() {
+    pinMode(SPEAKER_SD_PIN, OUTPUT);
+    digitalWrite(SPEAKER_SD_PIN, LOW); // Default to low-power shutdown mode
+
     i2s_config_t config = {
         .mode                 = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
         .sample_rate          = SAMPLE_RATE,
         .bits_per_sample      = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format       = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        // MAX98357A is a MONO amplifier — use LEFT channel only.
+        // RIGHT_LEFT (stereo) wastes 50% of every Wi-Fi packet on a channel
+        // the amp silently discards, directly worsening weak-Wi-Fi congestion.
+        .channel_format       = I2S_CHANNEL_FMT_ONLY_LEFT,
         .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .intr_alloc_flags     = ESP_INTR_FLAG_LEVEL1,
         .dma_buf_count        = DMA_BUF_COUNT,
@@ -80,7 +103,7 @@ void Speaker::init() {
         return;
     }
 
-    err = i2s_set_clk(SPEAKER_I2S_PORT, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+    err = i2s_set_clk(SPEAKER_I2S_PORT, SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
     if (err != ESP_OK) {
         Serial.printf("[Speaker] i2s_set_clk failed: %d\n", err);
         return;
@@ -88,7 +111,7 @@ void Speaker::init() {
 
     i2s_zero_dma_buffer(SPEAKER_I2S_PORT);
 
-    Serial.println("[Speaker] MAX98357A I2S Amplifier initialized");
+    Serial.println("[Speaker] MAX98357A I2S Amplifier initialized (SD pin on GPIO 18)");
 }
 
 void Speaker::startTask() {
@@ -113,19 +136,41 @@ void Speaker::write(const uint8_t* buffer, size_t size) {
         return;
     }
 
-    for (size_t i = 0; i < size; i++) {
+    // Bulk ring buffer write — single critical section for the whole packet.
+    // The old byte-by-byte loop entered/exited portENTER_CRITICAL 1024 times per
+    // packet, disabling interrupts repeatedly and starving the Wi-Fi RX task on
+    // Core 0, which caused the very packet delays that created audio stutter.
+    size_t i = 0;
+    while (i < size) {
         portENTER_CRITICAL(&ringMux);
+
+        // Calculate free space available in one contiguous segment
+        size_t freeSpace;
         size_t nextHead = (ringHead + 1) % RING_BUF_SIZE;
-        if (nextHead != ringTail) {
-            ringBuf[ringHead] = buffer[i];
-            ringHead = nextHead;
-        } else {
-            // Buffer full, drop oldest byte
-            ringTail = (ringTail + 1) % RING_BUF_SIZE;
-            ringBuf[ringHead] = buffer[i];
-            ringHead = nextHead;
+        if (nextHead == ringTail) {
+            // Buffer full — drop oldest 4 bytes to maintain PCM frame alignment
+            ringTail = (ringTail + 4) % RING_BUF_SIZE;
         }
+
+        // Write as many bytes as possible in this contiguous window
+        size_t canWriteToEnd = RING_BUF_SIZE - ringHead;
+        size_t canWriteBeforeWrap = (ringTail > ringHead)
+            ? (ringTail - ringHead - 1)
+            : (RING_BUF_SIZE - ringHead + ringTail - 1);
+
+        size_t toWrite = size - i;
+        if (toWrite > canWriteBeforeWrap) toWrite = canWriteBeforeWrap;
+        if (toWrite > canWriteToEnd)      toWrite = canWriteToEnd;
+
+        if (toWrite > 0) {
+            memcpy(&ringBuf[ringHead], &buffer[i], toWrite);
+            ringHead = (ringHead + toWrite) % RING_BUF_SIZE;
+            i += toWrite;
+        }
+
         portEXIT_CRITICAL(&ringMux);
+
+        if (toWrite == 0) break; // Safety: avoid infinite spin
     }
 }
 
@@ -211,6 +256,22 @@ void Speaker::stop() {
     portENTER_CRITICAL(&ringMux);
     ringHead = 0;
     ringTail = 0;
+    isBuffering = false;
+    activePlaybackMode = false;
     portEXIT_CRITICAL(&ringMux);
     i2s_zero_dma_buffer(SPEAKER_I2S_PORT);
+    digitalWrite(SPEAKER_SD_PIN, LOW); // Mute / shutdown amplifier
+}
+
+void Speaker::resetJitterBuffer() {
+    portENTER_CRITICAL(&ringMux);
+    isBuffering = true;
+    activePlaybackMode = true;
+    portEXIT_CRITICAL(&ringMux);
+}
+
+void Speaker::setPlaybackActive(bool active) {
+    portENTER_CRITICAL(&ringMux);
+    activePlaybackMode = active;
+    portEXIT_CRITICAL(&ringMux);
 }

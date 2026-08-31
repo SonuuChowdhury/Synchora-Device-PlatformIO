@@ -15,4 +15,7 @@ public:
     void playNotReadyBeep();
     void stop();
     bool isBusy();
+
+    void resetJitterBuffer();
+    void setPlaybackActive(bool active);
 };
